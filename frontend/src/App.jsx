@@ -359,7 +359,7 @@ function IngestTab({ onSuccess }) {
         }} onClick={() => document.getElementById("cv-upload").click()}>
           <i className="ti ti-file-text" style={{ fontSize: 20, color: "var(--color-text-tertiary)" }} aria-hidden="true" />
           <span style={{ fontSize: 13, color: "var(--color-text-secondary)" }}>
-            {cvFile ? cvFile.name : "Click to upload PDF CV — Claude will summarise it automatically"}
+            {cvFile ? cvFile.name : "Click to upload PDF CV — Gemini will summarise it automatically"}
           </span>
           <input id="cv-upload" type="file" accept=".pdf" style={{ display: "none" }}
             onChange={e => setCvFile(e.target.files[0] || null)} />
@@ -499,7 +499,7 @@ export default function App() {
           </span>
         </div>
         <p style={{ margin: 0, fontSize: 13, color: "var(--color-text-secondary)", lineHeight: 1.5 }}>
-          Semantic candidate matching for UK healthcare roles · Milvus vector DB · Claude AI summaries
+          Semantic candidate matching for UK healthcare roles · Milvus vector DB · Gemini AI summaries
         </p>
       </div>
 

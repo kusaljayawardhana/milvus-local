@@ -3,3 +3,5 @@
 
 # Docker volumes / local database storage
 volumes/
+
+.env
