@@ -1,0 +1,5 @@
+# Python virtual environment
+.venv/
+
+# Docker volumes / local database storage
+volumes/
