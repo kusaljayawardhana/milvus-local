@@ -2,7 +2,7 @@ import os
 import json
 import sqlite3
 import PyPDF2
-import anthropic
+import google.generativeai as genai
 import numpy as np
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
@@ -14,7 +14,7 @@ from typing import Optional
 import io
 
 # ── 1. Configuration ──────────────────────────────────────────────────────────
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "YOUR_ANTHROPIC_API_KEY_HERE")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "YOUR_GOOGLE_API_KEY_HERE")
 MILVUS_URI        = os.getenv("MILVUS_URI", "http://localhost:19530")
 COLLECTION_NAME   = "healthcare_candidates"
 SQLITE_DB_PATH    = "crm_database.db"
@@ -129,9 +129,9 @@ def delete_candidate_by_crm_id(crm_id: str) -> bool:
 async def lifespan(app: FastAPI):
     print("🏥 Booting Healthcare CV Search Engine...")
 
-    # Init Anthropic client
-    ml_models["anthropic"] = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    print("✅ Anthropic Claude client ready")
+    # Init Google Gemini client
+    genai.configure(api_key=GOOGLE_API_KEY)
+    print("✅ Google Gemini client ready")
 
     # Init embedding model
     print("Loading embedding model (all-mpnet-base-v2)...")
@@ -185,7 +185,7 @@ def extract_pdf_text(file_bytes: bytes) -> str:
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Could not read PDF: {e}")
 
-# ── 5. Helper: Claude Summarisation ──────────────────────────────────────────
+# ── 5. Helper: Gemini Summarisation ──────────────────────────────────────────
 def summarise_candidate(profile_data: dict, cv_text: str) -> str:
     prompt = f"""You are a specialist UK healthcare recruiter with deep NHS knowledge.
 Synthesise the candidate's CRM profile data and raw CV into a single dense paragraph (200-300 words).
@@ -205,12 +205,9 @@ RAW CV TEXT:
 
 Produce ONLY the summary paragraph, no preamble or labels."""
 
-    message = ml_models["anthropic"].messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=512,
-        messages=[{"role": "user", "content": prompt}]
-    )
-    return message.content[0].text.strip()
+    model = genai.GenerativeModel("gemini-1.5-flash")
+    response = model.generate_content(prompt, stream=False)
+    return response.text.strip()
 
 # ── 6. Pydantic Models ────────────────────────────────────────────────────────
 class SearchRequest(BaseModel):
@@ -252,7 +249,7 @@ async def ingest_candidate(
     """
     Ingests a candidate into the system:
     1. Extracts text from PDF CV (if provided)
-    2. Claude summarises CV + profile data
+    2. Gemini summarises CV + profile data
     3. Embeds the summary
     4. Stores vector in Milvus
     5. Stores full profile in SQLite CRM
