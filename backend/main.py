@@ -146,6 +146,9 @@ async def lifespan(app: FastAPI):
     analyzer = build_default_analyzer(language="en")
     bm25 = BM25EmbeddingFunction(analyzer)
     ml_models["bm25"] = bm25      # store it for use in ingest + search
+    # Ensure CRM DB exists before querying it
+    init_crm_db()
+    print("✅ SQLite CRM database ready")
 
     # Fetch all existing summaries from SQLite to fit BM25 on startup
     existing_candidates = get_all_candidates_crm()
@@ -192,9 +195,6 @@ async def lifespan(app: FastAPI):
         client.load_collection(collection_name=COLLECTION_NAME)
         print(f"✅ Milvus collection '{COLLECTION_NAME}' loaded")
 
-    # Init SQLite CRM
-    init_crm_db()
-    print("✅ SQLite CRM database ready")
 
     print("🚀 System fully operational!")
     yield
@@ -333,18 +333,42 @@ Notes: {profile_dict.get('notes', '')}
     # Sparse BM25 embedding
     bm25 = ml_models["bm25"]
     #bm25.fit([ai_summary])            # incremental fit — see note below
-    sparse_vec = bm25.encode_documents([ai_summary])[0]   # returns a dict {token_id: weight}
+    raw_sparse = bm25.encode_documents([ai_summary])[0]   # returns a dict {token_id: weight}
+    # Convert to Milvus sparse vector format: {"ids": [...], "values": [...]}
+    if isinstance(raw_sparse, dict):
+        print(f"DEBUG: raw_sparse keys sample: {list(raw_sparse.keys())[:10]}", flush=True)
+        # convert to single-row sparse dict expected by pymilvus: [{index: value, ...}]
+        row = {int(k): float(v) for k, v in raw_sparse.items()}
+        sparse_vec = [row] if row else None
+        print(f"DEBUG: converted sparse_vec sample: {str(sparse_vec)[:200]}", flush=True)
+    else:
+        print(f"DEBUG: raw_sparse non-dict type: {type(raw_sparse)} repr: {str(raw_sparse)[:200]}", flush=True)
+        sparse_vec = raw_sparse
 
-    insert_result = db_clients["milvus"].insert(
-        collection_name=COLLECTION_NAME,
-        data=[{
-            "dense_vector":  dense_vec,
-            "sparse_vector": sparse_vec,
-            "name":          profile_dict.get("name", "Unknown"),
-            "ai_summary":    ai_summary
-        }]
-    )
-    milvus_id = insert_result["ids"][0]
+    insert_payload = {
+        "dense_vector": dense_vec,
+        "name":         profile_dict.get("name", "Unknown"),
+        "ai_summary":   ai_summary
+    }
+    # Include a sparse_vector; use empty nested lists if no tokens
+    if isinstance(sparse_vec, dict):
+        # ensure nested lists for rows
+        if not sparse_vec.get("ids"):
+            insert_payload["sparse_vector"] = {"ids": [[]], "values": [[]]}
+        else:
+            insert_payload["sparse_vector"] = sparse_vec
+    else:
+        insert_payload["sparse_vector"] = {"ids": [[]], "values": [[]]}
+    milvus_id = None
+    try:
+        insert_result = db_clients["milvus"].insert(
+            collection_name=COLLECTION_NAME,
+            data=[insert_payload]
+        )
+        milvus_id = insert_result["ids"][0]
+    except Exception as e:
+        print(f"Milvus insert failed: {e}", flush=True)
+        # Proceed without failing the entire ingest — store CRM entry without milvus_id
 
     # Store in SQLite CRM
     crm_row_id = insert_candidate_crm(profile_dict, ai_summary, milvus_id)
@@ -383,7 +407,12 @@ async def search_candidates(request: SearchRequest):
         )[0].tolist()
 
         # Sparse query vector
-        sparse_vec = bm25.encode_queries([request.job_description])[0]
+        raw_q_sparse = bm25.encode_queries([request.job_description])[0]
+        if isinstance(raw_q_sparse, dict):
+            q_row = {int(k): float(v) for k, v in raw_q_sparse.items()}
+            sparse_vec = [q_row] if q_row else None
+        else:
+            sparse_vec = raw_q_sparse
 
         dense_req = AnnSearchRequest(
             data=[dense_vec],
@@ -391,16 +420,20 @@ async def search_candidates(request: SearchRequest):
             param={"metric_type": "IP", "params": {"ef": 100}},
             limit=request.top_k * 2          # over-fetch so RRF has more to rank
         )
-        sparse_req = AnnSearchRequest(
-            data=[sparse_vec],
-            anns_field="sparse_vector",
-            param={"metric_type": "IP", "params": {"drop_ratio_search": 0.2}},
-            limit=request.top_k * 2
-        )
+
+        reqs = [dense_req]
+        if sparse_vec:
+            sparse_req = AnnSearchRequest(
+                data=[sparse_vec],
+                anns_field="sparse_vector",
+                param={"metric_type": "IP", "params": {"drop_ratio_search": 0.2}},
+                limit=request.top_k * 2
+            )
+            reqs.append(sparse_req)
 
         results = db_clients["milvus"].hybrid_search(
             collection_name=COLLECTION_NAME,
-            reqs=[dense_req, sparse_req],
+            reqs=reqs,
             ranker=RRFRanker(k=60),           # k=60 is the standard RRF constant
             limit=request.top_k,
             output_fields=["name", "ai_summary"]
