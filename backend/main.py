@@ -147,6 +147,18 @@ async def lifespan(app: FastAPI):
     bm25 = BM25EmbeddingFunction(analyzer)
     ml_models["bm25"] = bm25      # store it for use in ingest + search
 
+    # Fetch all existing summaries from SQLite to fit BM25 on startup
+    existing_candidates = get_all_candidates_crm()
+    existing_summaries = [c["ai_summary"] for c in existing_candidates if c.get("ai_summary")]
+
+    if existing_summaries:
+        bm25.fit(existing_summaries)
+        print(f"✅ BM25 fitted on {len(existing_summaries)} existing documents")
+    else:
+        # Fit on a placeholder so the model is initialised — will re-fit on first real ingest
+        bm25.fit(["placeholder healthcare candidate summary"])
+        print("⚠️  BM25 fitted on placeholder (no existing candidates)")
+
     # Init Milvus
     print("Connecting to Milvus...")
     client = MilvusClient(uri=MILVUS_URI)
@@ -320,7 +332,7 @@ Notes: {profile_dict.get('notes', '')}
 
     # Sparse BM25 embedding
     bm25 = ml_models["bm25"]
-    bm25.fit([ai_summary])            # incremental fit — see note below
+    #bm25.fit([ai_summary])            # incremental fit — see note below
     sparse_vec = bm25.encode_documents([ai_summary])[0]   # returns a dict {token_id: weight}
 
     insert_result = db_clients["milvus"].insert(
@@ -405,6 +417,10 @@ async def search_candidates(request: SearchRequest):
             crm_profile = get_candidate_by_milvus_id(milvus_id)
 
             if crm_profile:
+                raw_scores = [hit["distance"] for hit in results[0]]
+                min_s, max_s = min(raw_scores), max(raw_scores)
+                span = max_s - min_s if max_s != min_s else 1.0
+
                 enriched.append(CandidateResult(
                     crm_id=crm_profile["crm_id"],
                     milvus_id=milvus_id,
@@ -417,9 +433,6 @@ async def search_candidates(request: SearchRequest):
                     availability=crm_profile["availability"],
                     salary_exp=crm_profile["salary_exp"],
                     registration=crm_profile["registration"],
-                    raw_scores = [hit["distance"] for hit in results[0]]
-                    min_s, max_s = min(raw_scores), max(raw_scores)
-                    span = max_s - min_s if max_s != min_s else 1.0
                     match_percentage=round(((score - min_s) / span) * 100, 1),
                     ai_summary=crm_profile["ai_summary"]
                 ))

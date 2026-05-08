@@ -5,3 +5,12 @@
 volumes/
 
 .env
+
+# Local SQLite CRM database (untracked)
+crm_database.db
+backend/crm_database.db
+
+# Python bytecode / cache
+__pycache__/
+**/__pycache__/
+*.pyc
