@@ -9,7 +9,9 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
-from pymilvus import MilvusClient
+from pymilvus import MilvusClient, AnnSearchRequest, RRFRanker, WeightedRanker
+from pymilvus.model.sparse import BM25EmbeddingFunction
+from pymilvus.model.sparse.bm25.tokenizers import build_default_analyzer
 from typing import Optional
 import io
 
@@ -141,16 +143,37 @@ async def lifespan(app: FastAPI):
     dimension = ml_models["embedder"].get_sentence_embedding_dimension()
     print(f"✅ Embedder ready (dim={dimension})")
 
+    analyzer = build_default_analyzer(language="en")
+    bm25 = BM25EmbeddingFunction(analyzer)
+    ml_models["bm25"] = bm25      # store it for use in ingest + search
+
     # Init Milvus
     print("Connecting to Milvus...")
     client = MilvusClient(uri=MILVUS_URI)
     db_clients["milvus"] = client
     if not client.has_collection(COLLECTION_NAME):
+        from pymilvus import DataType, CollectionSchema, FieldSchema
+
+        # Build schema
+        fields = [
+            FieldSchema(name="id",           dtype=DataType.INT64,         is_primary=True, auto_id=True),
+            FieldSchema(name="name",         dtype=DataType.VARCHAR,        max_length=256),
+            FieldSchema(name="ai_summary",   dtype=DataType.VARCHAR,        max_length=4096),
+            FieldSchema(name="dense_vector", dtype=DataType.FLOAT_VECTOR,   dim=dimension),
+            FieldSchema(name="sparse_vector",dtype=DataType.SPARSE_FLOAT_VECTOR),
+        ]
+        schema = CollectionSchema(fields=fields, description="Healthcare candidates hybrid")
+
+        index_params = client.prepare_index_params()
+        index_params.add_index(field_name="dense_vector",  index_type="HNSW", metric_type="IP",
+                            params={"M": 16, "efConstruction": 200})
+        index_params.add_index(field_name="sparse_vector", index_type="SPARSE_INVERTED_INDEX",
+                            metric_type="IP", params={"drop_ratio_build": 0.2})
+
         client.create_collection(
             collection_name=COLLECTION_NAME,
-            dimension=dimension,
-            auto_id=True,
-            metric_type="IP"
+            schema=schema,
+            index_params=index_params
         )
         print(f"✅ Milvus collection '{COLLECTION_NAME}' created")
     else:
@@ -290,18 +313,23 @@ Notes: {profile_dict.get('notes', '')}
     # Summarise with Claude
     ai_summary = summarise_candidate(profile_dict, cv_text)
 
-    # Embed the summary
-    vector = ml_models["embedder"].encode(
+    # Dense embedding (unchanged)
+    dense_vec = ml_models["embedder"].encode(
         [ai_summary], normalize_embeddings=True
     )[0].tolist()
 
-    # Store in Milvus
+    # Sparse BM25 embedding
+    bm25 = ml_models["bm25"]
+    bm25.fit([ai_summary])            # incremental fit — see note below
+    sparse_vec = bm25.encode_documents([ai_summary])[0]   # returns a dict {token_id: weight}
+
     insert_result = db_clients["milvus"].insert(
         collection_name=COLLECTION_NAME,
         data=[{
-            "vector": vector,
-            "name": profile_dict.get("name", "Unknown"),
-            "ai_summary": ai_summary
+            "dense_vector":  dense_vec,
+            "sparse_vector": sparse_vec,
+            "name":          profile_dict.get("name", "Unknown"),
+            "ai_summary":    ai_summary
         }]
     )
     milvus_id = insert_result["ids"][0]
@@ -335,9 +363,33 @@ async def search_candidates(request: SearchRequest):
 
     # Search Milvus
     try:
-        results = db_clients["milvus"].search(
+        bm25 = ml_models["bm25"]
+
+        # Dense query vector
+        dense_vec = ml_models["embedder"].encode(
+            [request.job_description], normalize_embeddings=True
+        )[0].tolist()
+
+        # Sparse query vector
+        sparse_vec = bm25.encode_queries([request.job_description])[0]
+
+        dense_req = AnnSearchRequest(
+            data=[dense_vec],
+            anns_field="dense_vector",
+            param={"metric_type": "IP", "params": {"ef": 100}},
+            limit=request.top_k * 2          # over-fetch so RRF has more to rank
+        )
+        sparse_req = AnnSearchRequest(
+            data=[sparse_vec],
+            anns_field="sparse_vector",
+            param={"metric_type": "IP", "params": {"drop_ratio_search": 0.2}},
+            limit=request.top_k * 2
+        )
+
+        results = db_clients["milvus"].hybrid_search(
             collection_name=COLLECTION_NAME,
-            data=[jd_vector],
+            reqs=[dense_req, sparse_req],
+            ranker=RRFRanker(k=60),           # k=60 is the standard RRF constant
             limit=request.top_k,
             output_fields=["name", "ai_summary"]
         )
@@ -365,7 +417,10 @@ async def search_candidates(request: SearchRequest):
                     availability=crm_profile["availability"],
                     salary_exp=crm_profile["salary_exp"],
                     registration=crm_profile["registration"],
-                    match_percentage=round(score * 100, 1),
+                    raw_scores = [hit["distance"] for hit in results[0]]
+                    min_s, max_s = min(raw_scores), max(raw_scores)
+                    span = max_s - min_s if max_s != min_s else 1.0
+                    match_percentage=round(((score - min_s) / span) * 100, 1),
                     ai_summary=crm_profile["ai_summary"]
                 ))
             else:
