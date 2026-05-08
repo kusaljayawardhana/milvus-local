@@ -15,9 +15,11 @@ import io
 
 # ── 1. Configuration ──────────────────────────────────────────────────────────
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "YOUR_GOOGLE_API_KEY_HERE")
+LLM_MODEL = os.getenv("LLM_MODEL", "gemini-2.5-flash")
 MILVUS_URI        = os.getenv("MILVUS_URI", "http://localhost:19530")
 COLLECTION_NAME   = "healthcare_candidates"
 SQLITE_DB_PATH    = "crm_database.db"
+LLM_MODEL = os.getenv("LLM_MODEL", "gemini-2.5-flash")
 
 ml_models = {}
 db_clients = {}
@@ -205,9 +207,13 @@ RAW CV TEXT:
 
 Produce ONLY the summary paragraph, no preamble or labels."""
 
-    model = genai.GenerativeModel("gemini-1.5-flash")
-    response = model.generate_content(prompt, stream=False)
-    return response.text.strip()
+    try:
+        model = genai.GenerativeModel(LLM_MODEL)
+        response = model.generate_content(prompt, stream=False)
+        return response.text.strip()
+    except Exception as e:
+        print(f"LLM error ({LLM_MODEL}): {e}", flush=True)
+        raise HTTPException(status_code=502, detail=f"LLM error: {e}")
 
 # ── 6. Pydantic Models ────────────────────────────────────────────────────────
 class SearchRequest(BaseModel):
@@ -299,7 +305,6 @@ Notes: {profile_dict.get('notes', '')}
         }]
     )
     milvus_id = insert_result["ids"][0]
-    db_clients["milvus"].flush(collection_name=COLLECTION_NAME)
 
     # Store in SQLite CRM
     crm_row_id = insert_candidate_crm(profile_dict, ai_summary, milvus_id)
