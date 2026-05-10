@@ -9,62 +9,61 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
-from pymilvus import MilvusClient, AnnSearchRequest, RRFRanker, WeightedRanker
+from pymilvus import MilvusClient, AnnSearchRequest, RRFRanker
 from pymilvus.model.sparse import BM25EmbeddingFunction
 from pymilvus.model.sparse.bm25.tokenizers import build_default_analyzer
 from typing import Optional
 import io
 
 # ── 1. Configuration ──────────────────────────────────────────────────────────
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "YOUR_GOOGLE_API_KEY_HERE")
-LLM_MODEL = os.getenv("LLM_MODEL", "gemini-2.5-flash")
-MILVUS_URI        = os.getenv("MILVUS_URI", "http://localhost:19530")
-COLLECTION_NAME   = "healthcare_candidates"
-SQLITE_DB_PATH    = "crm_database.db"
-LLM_MODEL = os.getenv("LLM_MODEL", "gemini-2.5-flash")
+GOOGLE_API_KEY  = os.getenv("GOOGLE_API_KEY", "YOUR_GOOGLE_API_KEY_HERE")
+LLM_MODEL       = os.getenv("LLM_MODEL", "gemini-2.5-flash")
+MILVUS_URI      = os.getenv("MILVUS_URI", "http://localhost:19530")
+COLLECTION_NAME = "healthcare_candidates"
+SQLITE_DB_PATH  = "crm_database.db"
 
-ml_models = {}
+ml_models  = {}
 db_clients = {}
+
 
 # ── 2. SQLite CRM Database Helpers ────────────────────────────────────────────
 def init_crm_db():
-    """Creates the SQLite CRM database and tables if they don't exist."""
     conn = sqlite3.connect(SQLITE_DB_PATH)
     c = conn.cursor()
     c.execute("""
         CREATE TABLE IF NOT EXISTS candidates (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            crm_id      TEXT UNIQUE NOT NULL,
-            name        TEXT NOT NULL,
-            email       TEXT,
-            phone       TEXT,
-            location    TEXT,
-            job_title   TEXT,
-            nhs_band    TEXT,
-            years_exp   INTEGER,
-            specialisms TEXT,
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            crm_id       TEXT UNIQUE NOT NULL,
+            name         TEXT NOT NULL,
+            email        TEXT,
+            phone        TEXT,
+            location     TEXT,
+            job_title    TEXT,
+            nhs_band     TEXT,
+            years_exp    INTEGER,
+            specialisms  TEXT,
             availability TEXT,
-            salary_exp  TEXT,
+            salary_exp   TEXT,
             registration TEXT,
-            ai_summary  TEXT,
-            milvus_id   INTEGER,
-            created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+            ai_summary   TEXT,
+            milvus_id    INTEGER,
+            created_at   DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
     conn.commit()
     conn.close()
 
+
 def insert_candidate_crm(crm_data: dict, ai_summary: str, milvus_id: int) -> int:
-    """Inserts a candidate record into the SQLite CRM."""
     conn = sqlite3.connect(SQLITE_DB_PATH)
     c = conn.cursor()
     c.execute("""
-        INSERT OR REPLACE INTO candidates 
+        INSERT OR REPLACE INTO candidates
         (crm_id, name, email, phone, location, job_title, nhs_band, years_exp,
          specialisms, availability, salary_exp, registration, ai_summary, milvus_id)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
-        crm_data.get("crm_id", f"CRM-{np.random.randint(10000,99999)}"),
+        crm_data.get("crm_id", f"CRM-{np.random.randint(10000, 99999)}"),
         crm_data.get("name", "Unknown"),
         crm_data.get("email", ""),
         crm_data.get("phone", ""),
@@ -77,15 +76,15 @@ def insert_candidate_crm(crm_data: dict, ai_summary: str, milvus_id: int) -> int
         crm_data.get("salary_exp", ""),
         crm_data.get("registration", ""),
         ai_summary,
-        milvus_id
+        milvus_id,
     ))
     new_id = c.lastrowid
     conn.commit()
     conn.close()
     return new_id
 
+
 def get_candidate_by_milvus_id(milvus_id: int) -> Optional[dict]:
-    """Fetches a candidate from CRM by their Milvus vector ID."""
     conn = sqlite3.connect(SQLITE_DB_PATH)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
@@ -98,8 +97,8 @@ def get_candidate_by_milvus_id(milvus_id: int) -> Optional[dict]:
         return d
     return None
 
+
 def get_all_candidates_crm() -> list:
-    """Returns all candidates from the CRM database."""
     conn = sqlite3.connect(SQLITE_DB_PATH)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
@@ -113,8 +112,8 @@ def get_all_candidates_crm() -> list:
         result.append(d)
     return result
 
-def delete_candidate_by_crm_id(crm_id: str) -> bool:
-    """Deletes a candidate from the CRM and returns their milvus_id."""
+
+def delete_candidate_by_crm_id(crm_id: str):
     conn = sqlite3.connect(SQLITE_DB_PATH)
     c = conn.cursor()
     c.execute("SELECT milvus_id FROM candidates WHERE crm_id = ?", (crm_id,))
@@ -128,16 +127,33 @@ def delete_candidate_by_crm_id(crm_id: str) -> bool:
     conn.close()
     return milvus_id
 
-# ── 3. Server Startup ─────────────────────────────────────────────────────────
+
+# ── 3. Sparse-vector helper ───────────────────────────────────────────────────
+def sparse_matrix_to_dict(sparse_matrix) -> dict:
+    """
+    Convert a scipy sparse matrix (single row) to a {int: float} dict
+    that Milvus accepts.
+
+    FIX: Filter out any non-positive values.  BM25 IDF can produce
+    zero or negative weights for extremely common terms; Milvus requires
+    all values to be strictly > 0.
+    """
+    cx = sparse_matrix.tocoo()
+    return {
+        int(j): float(v)
+        for j, v in zip(cx.col, cx.data)
+        if v > 0          # ← THE KEY FIX: drop negatives / zeros
+    }
+
+
+# ── 4. Server Startup ─────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("🏥 Booting Healthcare CV Search Engine...")
 
-    # Init Google Gemini client
     genai.configure(api_key=GOOGLE_API_KEY)
     print("✅ Google Gemini client ready")
 
-    # Init embedding model
     print("Loading embedding model (all-mpnet-base-v2)...")
     ml_models["embedder"] = SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
     dimension = ml_models["embedder"].get_sentence_embedding_dimension()
@@ -145,12 +161,11 @@ async def lifespan(app: FastAPI):
 
     analyzer = build_default_analyzer(language="en")
     bm25 = BM25EmbeddingFunction(analyzer)
-    ml_models["bm25"] = bm25      # store it for use in ingest + search
-    # Ensure CRM DB exists before querying it
+    ml_models["bm25"] = bm25
+
     init_crm_db()
     print("✅ SQLite CRM database ready")
 
-    # Fetch all existing summaries from SQLite to fit BM25 on startup
     existing_candidates = get_all_candidates_crm()
     existing_summaries = [c["ai_summary"] for c in existing_candidates if c.get("ai_summary")]
 
@@ -158,43 +173,48 @@ async def lifespan(app: FastAPI):
         bm25.fit(existing_summaries)
         print(f"✅ BM25 fitted on {len(existing_summaries)} existing documents")
     else:
-        # Fit on a placeholder so the model is initialised — will re-fit on first real ingest
         bm25.fit(["placeholder healthcare candidate summary"])
         print("⚠️  BM25 fitted on placeholder (no existing candidates)")
 
-    # Init Milvus
     print("Connecting to Milvus...")
     client = MilvusClient(uri=MILVUS_URI)
     db_clients["milvus"] = client
+
     if not client.has_collection(COLLECTION_NAME):
         from pymilvus import DataType, CollectionSchema, FieldSchema
 
-        # Build schema
         fields = [
-            FieldSchema(name="id",           dtype=DataType.INT64,         is_primary=True, auto_id=True),
-            FieldSchema(name="name",         dtype=DataType.VARCHAR,        max_length=256),
-            FieldSchema(name="ai_summary",   dtype=DataType.VARCHAR,        max_length=4096),
-            FieldSchema(name="dense_vector", dtype=DataType.FLOAT_VECTOR,   dim=dimension),
-            FieldSchema(name="sparse_vector",dtype=DataType.SPARSE_FLOAT_VECTOR),
+            FieldSchema(name="id",            dtype=DataType.INT64,              is_primary=True, auto_id=True),
+            FieldSchema(name="name",          dtype=DataType.VARCHAR,             max_length=256),
+            FieldSchema(name="ai_summary",    dtype=DataType.VARCHAR,             max_length=4096),
+            FieldSchema(name="dense_vector",  dtype=DataType.FLOAT_VECTOR,        dim=dimension),
+            FieldSchema(name="sparse_vector", dtype=DataType.SPARSE_FLOAT_VECTOR),
         ]
         schema = CollectionSchema(fields=fields, description="Healthcare candidates hybrid")
 
         index_params = client.prepare_index_params()
-        index_params.add_index(field_name="dense_vector",  index_type="HNSW", metric_type="IP",
-                            params={"M": 16, "efConstruction": 200})
-        index_params.add_index(field_name="sparse_vector", index_type="SPARSE_INVERTED_INDEX",
-                            metric_type="IP", params={"drop_ratio_build": 0.2})
+        index_params.add_index(
+            field_name="dense_vector",
+            index_type="HNSW",
+            metric_type="IP",
+            params={"M": 16, "efConstruction": 200},
+        )
+        index_params.add_index(
+            field_name="sparse_vector",
+            index_type="SPARSE_INVERTED_INDEX",
+            metric_type="IP",
+            params={"drop_ratio_build": 0.2},
+        )
 
         client.create_collection(
             collection_name=COLLECTION_NAME,
             schema=schema,
-            index_params=index_params
+            index_params=index_params,
         )
         print(f"✅ Milvus collection '{COLLECTION_NAME}' created")
     else:
         client.load_collection(collection_name=COLLECTION_NAME)
         print(f"✅ Milvus collection '{COLLECTION_NAME}' loaded")
-
 
     print("🚀 System fully operational!")
     yield
@@ -202,6 +222,7 @@ async def lifespan(app: FastAPI):
     print("Shutting down...")
     ml_models.clear()
     db_clients.clear()
+
 
 app = FastAPI(title="Healthcare CV Semantic Search", version="1.0.0", lifespan=lifespan)
 
@@ -213,7 +234,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── 4. Helper: PDF Extraction ─────────────────────────────────────────────────
+
+# ── 5. Helper: PDF Extraction ─────────────────────────────────────────────────
 def extract_pdf_text(file_bytes: bytes) -> str:
     try:
         reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
@@ -222,7 +244,8 @@ def extract_pdf_text(file_bytes: bytes) -> str:
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Could not read PDF: {e}")
 
-# ── 5. Helper: Gemini Summarisation ──────────────────────────────────────────
+
+# ── 6. Helper: Gemini Summarisation ──────────────────────────────────────────
 def summarise_candidate(profile_data: dict, cv_text: str) -> str:
     prompt = f"""You are a specialist UK healthcare recruiter with deep NHS knowledge.
 Synthesise the candidate's CRM profile data and raw CV into a single dense paragraph (200-300 words).
@@ -250,10 +273,12 @@ Produce ONLY the summary paragraph, no preamble or labels."""
         print(f"LLM error ({LLM_MODEL}): {e}", flush=True)
         raise HTTPException(status_code=502, detail=f"LLM error: {e}")
 
-# ── 6. Pydantic Models ────────────────────────────────────────────────────────
+
+# ── 7. Pydantic Models ────────────────────────────────────────────────────────
 class SearchRequest(BaseModel):
     job_description: str
     top_k: int = 5
+
 
 class CandidateResult(BaseModel):
     crm_id: str
@@ -270,38 +295,30 @@ class CandidateResult(BaseModel):
     match_percentage: float
     ai_summary: str
 
-# ── 7. Endpoints ──────────────────────────────────────────────────────────────
+
+# ── 8. Endpoints ──────────────────────────────────────────────────────────────
 
 @app.get("/health")
 async def health():
     return {"status": "healthy", "service": "Healthcare CV Search"}
 
+
 @app.get("/candidates", summary="List all candidates in CRM")
 async def list_candidates():
-    """Returns all candidates stored in the CRM database."""
     candidates = get_all_candidates_crm()
     return {"count": len(candidates), "candidates": candidates}
 
+
 @app.post("/ingest", summary="Ingest a candidate CV + profile into the system")
 async def ingest_candidate(
-    profile_data: str = Form(..., description='JSON with name, email, crm_id, job_title, nhs_band, specialisms, etc.'),
-    cv_file: UploadFile = File(None, description="Optional PDF CV file")
+    profile_data: str = Form(..., description="JSON with name, email, crm_id, job_title, nhs_band, specialisms, etc."),
+    cv_file: UploadFile = File(None, description="Optional PDF CV file"),
 ):
-    """
-    Ingests a candidate into the system:
-    1. Extracts text from PDF CV (if provided)
-    2. Gemini summarises CV + profile data
-    3. Embeds the summary
-    4. Stores vector in Milvus
-    5. Stores full profile in SQLite CRM
-    Returns the CRM record and generated summary.
-    """
     try:
         profile_dict = json.loads(profile_data)
     except Exception:
         raise HTTPException(status_code=400, detail="profile_data must be valid JSON.")
 
-    # Extract PDF text if provided
     cv_text = ""
     if cv_file and cv_file.filename:
         if not cv_file.filename.lower().endswith(".pdf"):
@@ -309,7 +326,6 @@ async def ingest_candidate(
         cv_bytes = await cv_file.read()
         cv_text = extract_pdf_text(cv_bytes)
 
-    # If no CV text, build a text block from profile data
     if not cv_text:
         cv_text = f"""
 Name: {profile_dict.get('name', '')}
@@ -322,7 +338,6 @@ Registration: {profile_dict.get('registration', '')}
 Notes: {profile_dict.get('notes', '')}
 """
 
-    # Summarise with Claude
     ai_summary = summarise_candidate(profile_dict, cv_text)
 
     # Dense embedding
@@ -330,18 +345,20 @@ Notes: {profile_dict.get('notes', '')}
         [ai_summary], normalize_embeddings=True
     )[0].tolist()
 
-    # Re-fit BM25 on full corpus including this new document, then encode
+    # Re-fit BM25 on full corpus so IDF is always up to date
     bm25 = ml_models["bm25"]
     all_summaries = [c["ai_summary"] for c in get_all_candidates_crm() if c.get("ai_summary")]
-    all_summaries.append(ai_summary)  # include the new one not yet in DB
+    all_summaries.append(ai_summary)
     bm25.fit(all_summaries)
 
-    # encode_documents returns a csr_matrix (scipy sparse); row 0 is our document.
-    # pymilvus expects a plain dict {token_id (int): weight (float)} per row.
+    # FIX: use the shared helper that strips non-positive values
     sparse_matrix = bm25.encode_documents([ai_summary])
-    cx = sparse_matrix.tocoo()  # convert to COO for easy iteration
-    sparse_vec = {int(j): float(v) for j, v in zip(cx.col, cx.data)}
+    sparse_vec = sparse_matrix_to_dict(sparse_matrix)
     print(f"✅ Sparse vector: {len(sparse_vec)} non-zero tokens", flush=True)
+
+    # Guard: Milvus requires at least one entry in the sparse vector
+    if not sparse_vec:
+        raise HTTPException(status_code=422, detail="Sparse vector is empty after encoding — document may be too short.")
 
     insert_result = db_clients["milvus"].insert(
         collection_name=COLLECTION_NAME,
@@ -349,57 +366,45 @@ Notes: {profile_dict.get('notes', '')}
             "dense_vector":  dense_vec,
             "sparse_vector": sparse_vec,
             "name":          profile_dict.get("name", "Unknown"),
-            "ai_summary":    ai_summary
-        }]
+            "ai_summary":    ai_summary,
+        }],
     )
     milvus_id = insert_result["ids"][0]
 
-    # Store in SQLite CRM
     crm_row_id = insert_candidate_crm(profile_dict, ai_summary, milvus_id)
 
     return {
-        "status": "success",
-        "crm_row_id": crm_row_id,
-        "milvus_id": milvus_id,
-        "crm_id": profile_dict.get("crm_id"),
-        "name": profile_dict.get("name"),
-        "ai_summary": ai_summary
+        "status":      "success",
+        "crm_row_id":  crm_row_id,
+        "milvus_id":   milvus_id,
+        "crm_id":      profile_dict.get("crm_id"),
+        "name":        profile_dict.get("name"),
+        "ai_summary":  ai_summary,
     }
+
 
 @app.post("/search", response_model=list[CandidateResult], summary="Search candidates by job description")
 async def search_candidates(request: SearchRequest):
-    """
-    Semantic search: takes a UK healthcare job description, 
-    embeds it, queries Milvus, enriches results from SQLite CRM,
-    returns top candidates with match percentages.
-    """
     if not request.job_description.strip():
         raise HTTPException(status_code=400, detail="job_description cannot be empty.")
 
-    # Embed the JD
-    jd_vector = ml_models["embedder"].encode(
+    bm25 = ml_models["bm25"]
+
+    # Dense query vector
+    dense_vec = ml_models["embedder"].encode(
         [request.job_description], normalize_embeddings=True
     )[0].tolist()
 
-    # Search Milvus
+    # FIX: use the shared helper that strips non-positive values
+    sparse_matrix_q = bm25.encode_queries([request.job_description])
+    sparse_vec = sparse_matrix_to_dict(sparse_matrix_q)
+
     try:
-        bm25 = ml_models["bm25"]
-
-        # Dense query vector
-        dense_vec = ml_models["embedder"].encode(
-            [request.job_description], normalize_embeddings=True
-        )[0].tolist()
-
-        # Sparse query vector — encode_queries returns a csr_matrix, convert to {int: float}
-        sparse_matrix_q = bm25.encode_queries([request.job_description])
-        cx_q = sparse_matrix_q.tocoo()
-        sparse_vec = {int(j): float(v) for j, v in zip(cx_q.col, cx_q.data)}
-
         dense_req = AnnSearchRequest(
             data=[dense_vec],
             anns_field="dense_vector",
             param={"metric_type": "IP", "params": {"ef": 100}},
-            limit=request.top_k * 2
+            limit=request.top_k * 2,
         )
 
         reqs = [dense_req]
@@ -408,33 +413,33 @@ async def search_candidates(request: SearchRequest):
                 data=[sparse_vec],
                 anns_field="sparse_vector",
                 param={"metric_type": "IP", "params": {"drop_ratio_search": 0.2}},
-                limit=request.top_k * 2
+                limit=request.top_k * 2,
             )
             reqs.append(sparse_req)
 
         results = db_clients["milvus"].hybrid_search(
             collection_name=COLLECTION_NAME,
             reqs=reqs,
-            ranker=RRFRanker(k=60),           # k=60 is the standard RRF constant
+            ranker=RRFRanker(k=60),
             limit=request.top_k,
-            output_fields=["name", "ai_summary"]
+            output_fields=["name", "ai_summary"],
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Milvus search error: {e}")
 
-    # Enrich with CRM data
     enriched = []
     if results and len(results[0]) > 0:
+        raw_scores = [hit["distance"] for hit in results[0]]
+        min_s = min(raw_scores)
+        max_s = max(raw_scores)
+        span  = max_s - min_s if max_s != min_s else 1.0  # FIX: compute once, outside the loop
+
         for hit in results[0]:
-            milvus_id = hit["id"]
-            score = hit["distance"]
+            milvus_id   = hit["id"]
+            score       = hit["distance"]
             crm_profile = get_candidate_by_milvus_id(milvus_id)
 
             if crm_profile:
-                raw_scores = [hit["distance"] for hit in results[0]]
-                min_s, max_s = min(raw_scores), max(raw_scores)
-                span = max_s - min_s if max_s != min_s else 1.0
-
                 enriched.append(CandidateResult(
                     crm_id=crm_profile["crm_id"],
                     milvus_id=milvus_id,
@@ -448,10 +453,9 @@ async def search_candidates(request: SearchRequest):
                     salary_exp=crm_profile["salary_exp"],
                     registration=crm_profile["registration"],
                     match_percentage=round(((score - min_s) / span) * 100, 1),
-                    ai_summary=crm_profile["ai_summary"]
+                    ai_summary=crm_profile["ai_summary"],
                 ))
             else:
-                # Fallback if not found in CRM
                 enriched.append(CandidateResult(
                     crm_id=f"MV-{milvus_id}",
                     milvus_id=milvus_id,
@@ -464,15 +468,15 @@ async def search_candidates(request: SearchRequest):
                     availability="",
                     salary_exp="",
                     registration="",
-                    match_percentage=round(score * 100, 1),
-                    ai_summary=hit["entity"].get("ai_summary", "")
+                    match_percentage=round(((score - min_s) / span) * 100, 1),
+                    ai_summary=hit["entity"].get("ai_summary", ""),
                 ))
 
     return enriched
 
+
 @app.delete("/candidate/{crm_id}", summary="Remove a candidate from the system")
 async def delete_candidate(crm_id: str):
-    """Deletes a candidate from both Milvus and the CRM SQLite database."""
     milvus_id = delete_candidate_by_crm_id(crm_id)
     if milvus_id is None:
         raise HTTPException(status_code=404, detail=f"Candidate '{crm_id}' not found.")
@@ -480,7 +484,7 @@ async def delete_candidate(crm_id: str):
     try:
         db_clients["milvus"].delete(
             collection_name=COLLECTION_NAME,
-            ids=[milvus_id]
+            ids=[milvus_id],
         )
     except Exception as e:
         return {"status": "partial", "message": f"Removed from CRM but Milvus error: {e}"}
