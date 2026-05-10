@@ -325,50 +325,34 @@ Notes: {profile_dict.get('notes', '')}
     # Summarise with Claude
     ai_summary = summarise_candidate(profile_dict, cv_text)
 
-    # Dense embedding (unchanged)
+    # Dense embedding
     dense_vec = ml_models["embedder"].encode(
         [ai_summary], normalize_embeddings=True
     )[0].tolist()
 
-    # Sparse BM25 embedding
+    # Re-fit BM25 on full corpus including this new document, then encode
     bm25 = ml_models["bm25"]
-    #bm25.fit([ai_summary])            # incremental fit — see note below
-    raw_sparse = bm25.encode_documents([ai_summary])[0]   # returns a dict {token_id: weight}
-    # Convert to Milvus sparse vector format: {"ids": [...], "values": [...]}
-    if isinstance(raw_sparse, dict):
-        print(f"DEBUG: raw_sparse keys sample: {list(raw_sparse.keys())[:10]}", flush=True)
-        # convert to single-row sparse dict expected by pymilvus: [{index: value, ...}]
-        row = {int(k): float(v) for k, v in raw_sparse.items()}
-        sparse_vec = [row] if row else None
-        print(f"DEBUG: converted sparse_vec sample: {str(sparse_vec)[:200]}", flush=True)
-    else:
-        print(f"DEBUG: raw_sparse non-dict type: {type(raw_sparse)} repr: {str(raw_sparse)[:200]}", flush=True)
-        sparse_vec = raw_sparse
+    all_summaries = [c["ai_summary"] for c in get_all_candidates_crm() if c.get("ai_summary")]
+    all_summaries.append(ai_summary)  # include the new one not yet in DB
+    bm25.fit(all_summaries)
 
-    insert_payload = {
-        "dense_vector": dense_vec,
-        "name":         profile_dict.get("name", "Unknown"),
-        "ai_summary":   ai_summary
-    }
-    # Include a sparse_vector; use empty nested lists if no tokens
-    if isinstance(sparse_vec, dict):
-        # ensure nested lists for rows
-        if not sparse_vec.get("ids"):
-            insert_payload["sparse_vector"] = {"ids": [[]], "values": [[]]}
-        else:
-            insert_payload["sparse_vector"] = sparse_vec
-    else:
-        insert_payload["sparse_vector"] = {"ids": [[]], "values": [[]]}
-    milvus_id = None
-    try:
-        insert_result = db_clients["milvus"].insert(
-            collection_name=COLLECTION_NAME,
-            data=[insert_payload]
-        )
-        milvus_id = insert_result["ids"][0]
-    except Exception as e:
-        print(f"Milvus insert failed: {e}", flush=True)
-        # Proceed without failing the entire ingest — store CRM entry without milvus_id
+    # encode_documents returns a csr_matrix (scipy sparse); row 0 is our document.
+    # pymilvus expects a plain dict {token_id (int): weight (float)} per row.
+    sparse_matrix = bm25.encode_documents([ai_summary])
+    cx = sparse_matrix.tocoo()  # convert to COO for easy iteration
+    sparse_vec = {int(j): float(v) for j, v in zip(cx.col, cx.data)}
+    print(f"✅ Sparse vector: {len(sparse_vec)} non-zero tokens", flush=True)
+
+    insert_result = db_clients["milvus"].insert(
+        collection_name=COLLECTION_NAME,
+        data=[{
+            "dense_vector":  dense_vec,
+            "sparse_vector": sparse_vec,
+            "name":          profile_dict.get("name", "Unknown"),
+            "ai_summary":    ai_summary
+        }]
+    )
+    milvus_id = insert_result["ids"][0]
 
     # Store in SQLite CRM
     crm_row_id = insert_candidate_crm(profile_dict, ai_summary, milvus_id)
@@ -406,19 +390,16 @@ async def search_candidates(request: SearchRequest):
             [request.job_description], normalize_embeddings=True
         )[0].tolist()
 
-        # Sparse query vector
-        raw_q_sparse = bm25.encode_queries([request.job_description])[0]
-        if isinstance(raw_q_sparse, dict):
-            q_row = {int(k): float(v) for k, v in raw_q_sparse.items()}
-            sparse_vec = [q_row] if q_row else None
-        else:
-            sparse_vec = raw_q_sparse
+        # Sparse query vector — encode_queries returns a csr_matrix, convert to {int: float}
+        sparse_matrix_q = bm25.encode_queries([request.job_description])
+        cx_q = sparse_matrix_q.tocoo()
+        sparse_vec = {int(j): float(v) for j, v in zip(cx_q.col, cx_q.data)}
 
         dense_req = AnnSearchRequest(
             data=[dense_vec],
             anns_field="dense_vector",
             param={"metric_type": "IP", "params": {"ef": 100}},
-            limit=request.top_k * 2          # over-fetch so RRF has more to rank
+            limit=request.top_k * 2
         )
 
         reqs = [dense_req]
