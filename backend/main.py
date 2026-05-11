@@ -22,6 +22,12 @@ MILVUS_URI      = os.getenv("MILVUS_URI", "http://localhost:19530")
 COLLECTION_NAME = "healthcare_candidates"
 SQLITE_DB_PATH  = "crm_database.db"
 
+# Match-percentage weighting — must sum to 1.0
+# Dense (cosine): captures semantic meaning, synonyms, context
+# Sparse (BM25):  captures exact keyword matches, NHS terms, band levels
+DENSE_WEIGHT  = 0.7
+SPARSE_WEIGHT = 0.3
+
 ml_models  = {}
 db_clients = {}
 
@@ -133,16 +139,14 @@ def sparse_matrix_to_dict(sparse_matrix) -> dict:
     """
     Convert a scipy sparse matrix (single row) to a {int: float} dict
     that Milvus accepts.
-
-    FIX: Filter out any non-positive values.  BM25 IDF can produce
-    zero or negative weights for extremely common terms; Milvus requires
-    all values to be strictly > 0.
+    Filters out non-positive values — BM25 IDF can produce negative weights
+    for extremely common terms; Milvus requires all values to be strictly > 0.
     """
     cx = sparse_matrix.tocoo()
     return {
         int(j): float(v)
         for j, v in zip(cx.col, cx.data)
-        if v > 0          # ← THE KEY FIX: drop negatives / zeros
+        if v > 0
     }
 
 
@@ -345,18 +349,16 @@ Notes: {profile_dict.get('notes', '')}
         [ai_summary], normalize_embeddings=True
     )[0].tolist()
 
-    # Re-fit BM25 on full corpus so IDF is always up to date
+    # Re-fit BM25 on full corpus so IDF is always up to date, then encode
     bm25 = ml_models["bm25"]
     all_summaries = [c["ai_summary"] for c in get_all_candidates_crm() if c.get("ai_summary")]
     all_summaries.append(ai_summary)
     bm25.fit(all_summaries)
 
-    # FIX: use the shared helper that strips non-positive values
     sparse_matrix = bm25.encode_documents([ai_summary])
     sparse_vec = sparse_matrix_to_dict(sparse_matrix)
     print(f"✅ Sparse vector: {len(sparse_vec)} non-zero tokens", flush=True)
 
-    # Guard: Milvus requires at least one entry in the sparse vector
     if not sparse_vec:
         raise HTTPException(status_code=422, detail="Sparse vector is empty after encoding — document may be too short.")
 
@@ -390,21 +392,23 @@ async def search_candidates(request: SearchRequest):
 
     bm25 = ml_models["bm25"]
 
-    # Dense query vector
+    # Encode query vectors
     dense_vec = ml_models["embedder"].encode(
         [request.job_description], normalize_embeddings=True
     )[0].tolist()
 
-    # FIX: use the shared helper that strips non-positive values
     sparse_matrix_q = bm25.encode_queries([request.job_description])
     sparse_vec = sparse_matrix_to_dict(sparse_matrix_q)
 
+    fetch_limit = request.top_k * 2
+
     try:
+        # ── Hybrid search (drives ranking / ordering via RRF) ─────────────────
         dense_req = AnnSearchRequest(
             data=[dense_vec],
             anns_field="dense_vector",
             param={"metric_type": "IP", "params": {"ef": 100}},
-            limit=request.top_k * 2,
+            limit=fetch_limit,
         )
 
         reqs = [dense_req]
@@ -413,31 +417,79 @@ async def search_candidates(request: SearchRequest):
                 data=[sparse_vec],
                 anns_field="sparse_vector",
                 param={"metric_type": "IP", "params": {"drop_ratio_search": 0.2}},
-                limit=request.top_k * 2,
+                limit=fetch_limit,
             )
             reqs.append(sparse_req)
 
-        results = db_clients["milvus"].hybrid_search(
+        hybrid_results = db_clients["milvus"].hybrid_search(
             collection_name=COLLECTION_NAME,
             reqs=reqs,
             ranker=RRFRanker(k=60),
             limit=request.top_k,
             output_fields=["name", "ai_summary"],
         )
+
+        # ── Separate dense search — raw cosine similarity scores ──────────────
+        # Dense embeddings are L2-normalised so inner product == cosine similarity,
+        # giving a natural [0, 1] range — no further normalisation needed.
+        dense_raw = db_clients["milvus"].search(
+            collection_name=COLLECTION_NAME,
+            data=[dense_vec],
+            anns_field="dense_vector",
+            search_params={"metric_type": "IP", "params": {"ef": 100}},
+            limit=fetch_limit,
+            output_fields=[],
+        )
+        dense_score_map: dict[int, float] = {
+            hit["id"]: float(hit["distance"])
+            for hit in dense_raw[0]
+        }
+
+        # ── Separate sparse search — raw BM25 IP scores ───────────────────────
+        # BM25 IP has no fixed upper bound, so we normalise by the highest score
+        # in this batch (the best-matching document becomes the 1.0 reference).
+        sparse_score_map: dict[int, float] = {}
+        if sparse_vec:
+            sparse_raw = db_clients["milvus"].search(
+                collection_name=COLLECTION_NAME,
+                data=[sparse_vec],
+                anns_field="sparse_vector",
+                search_params={"metric_type": "IP", "params": {"drop_ratio_search": 0.2}},
+                limit=fetch_limit,
+                output_fields=[],
+            )
+            raw_sparse_scores = [float(hit["distance"]) for hit in sparse_raw[0]]
+            sparse_max = max(raw_sparse_scores) if raw_sparse_scores else 1.0
+            sparse_max = sparse_max if sparse_max > 0 else 1.0
+            sparse_score_map = {
+                hit["id"]: float(hit["distance"]) / sparse_max
+                for hit in sparse_raw[0]
+            }
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Milvus search error: {e}")
 
-    enriched = []
-    if results and len(results[0]) > 0:
-        raw_scores = [hit["distance"] for hit in results[0]]
-        min_s = min(raw_scores)
-        max_s = max(raw_scores)
-        span  = max_s - min_s if max_s != min_s else 1.0  # FIX: compute once, outside the loop
+    # ── Weighted match percentage ─────────────────────────────────────────────
+    # dense_score  ∈ [0, 1]  — cosine similarity         (semantic meaning)
+    # sparse_score ∈ [0, 1]  — BM25 IP normalised        (keyword precision)
+    # combined     ∈ [0, 1]  — weighted blend of both
+    #
+    # Weights are defined at the top of the file (DENSE_WEIGHT / SPARSE_WEIGHT).
+    # A candidate that scores high on BOTH signals gets the highest percentage.
+    # The percentage is stable: changing top_k does not change a candidate's score.
+    def compute_match_pct(mid: int) -> float:
+        dense_score  = dense_score_map.get(mid, 0.0)
+        sparse_score = sparse_score_map.get(mid, 0.0)
+        combined = (DENSE_WEIGHT * dense_score) + (SPARSE_WEIGHT * sparse_score)
+        return round(min(combined, 1.0) * 100, 1)
 
-        for hit in results[0]:
+    # ── Enrich results with CRM data ──────────────────────────────────────────
+    enriched = []
+    if hybrid_results and len(hybrid_results[0]) > 0:
+        for hit in hybrid_results[0]:
             milvus_id   = hit["id"]
-            score       = hit["distance"]
             crm_profile = get_candidate_by_milvus_id(milvus_id)
+            pct         = compute_match_pct(milvus_id)
 
             if crm_profile:
                 enriched.append(CandidateResult(
@@ -452,7 +504,7 @@ async def search_candidates(request: SearchRequest):
                     availability=crm_profile["availability"],
                     salary_exp=crm_profile["salary_exp"],
                     registration=crm_profile["registration"],
-                    match_percentage=round(((score - min_s) / span) * 100, 1),
+                    match_percentage=pct,
                     ai_summary=crm_profile["ai_summary"],
                 ))
             else:
@@ -468,7 +520,7 @@ async def search_candidates(request: SearchRequest):
                     availability="",
                     salary_exp="",
                     registration="",
-                    match_percentage=round(((score - min_s) / span) * 100, 1),
+                    match_percentage=pct,
                     ai_summary=hit["entity"].get("ai_summary", ""),
                 ))
 
