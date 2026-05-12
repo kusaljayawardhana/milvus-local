@@ -37,7 +37,7 @@ SECTIONS: list[dict] = [
     {
         "key":    "profile",
         "label":  "Profile Summary",
-        "weight": 0.1,
+        "weight": 0.2,
         "hint":   (
             "Current job title, current employer, NHS band (if stated), a brief personal "
             "statement or career objective, and any headline facts the candidate leads with. "
@@ -47,7 +47,7 @@ SECTIONS: list[dict] = [
     {
         "key":    "qualifications",
         "label":  "Professional Qualifications",
-        "weight": 0.20,
+        "weight": 0.10,
         "hint":   (
             "All formal academic degrees (BSc, MSc, PhD), post-registration awards, diplomas, "
             "professional registrations (NMC PIN, GMC number, HCPC registration, GPhC, etc.), "
@@ -97,8 +97,8 @@ assert abs(sum(s["weight"] for s in SECTIONS) - 1.0) < 1e-6, "Section weights mu
 SECTION_KEYS = [s["key"] for s in SECTIONS]
 
 # Within each section: inner dense/sparse weighting
-DENSE_WEIGHT  = 1.0
-SPARSE_WEIGHT = 0.0
+DENSE_WEIGHT  = 0.8
+SPARSE_WEIGHT = 0.2
 
 ml_models  = {}
 db_clients = {}
@@ -259,6 +259,13 @@ NEVER repeat the same fact in two sections.
 If a section has genuinely no content, write a single sentence: "<Section>: Not stated."
 """
 
+VECTOR_DB_OPTIMIZATION_RULES = """
+VECTOR SEARCH OPTIMIZATION:
+These extracted sections will be embedded into a Vector Database to perform semantic similarity matching (cosine similarity) against Job Descriptions. To maximize match accuracy:
+1. MAXIMIZE DENSITY: Strip out conversational filler, adjectives, and narrative fluff. 
+2. KEYWORD RICHNESS: Prioritize standard NHS terminology, clinical keywords, exact procedure names, and specific system names.
+3. FORMATTING: Use fragmented sentences or comma-separated lists where appropriate to maximize the signal-to-noise ratio in the resulting vector.
+"""
 
 def _parse_llm_json(raw: str, context: str) -> dict:
     """Strip markdown fences and parse JSON, raising HTTP 502 on failure."""
@@ -312,6 +319,8 @@ Given only the candidate's name and raw CV text below, respond with a single JSO
 
 {_BLEED_RULES}
 
+{VECTOR_DB_OPTIMIZATION_RULES}
+
 CANDIDATE NAME: {name}
 
 RAW CV TEXT:
@@ -361,6 +370,8 @@ used for candidate CVs. Respond with a single JSON object (no markdown, no pream
 }}
 
 {_BLEED_RULES}
+
+{VECTOR_DB_OPTIMIZATION_RULES}
 
 If the JD does not mention a section at all, write exactly: "Not specified."
 Be dense and factual. Preserve the JD's wording where useful.
