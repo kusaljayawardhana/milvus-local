@@ -37,7 +37,7 @@ SECTIONS: list[dict] = [
     {
         "key":    "profile",
         "label":  "Profile Summary",
-        "weight": 0.15,
+        "weight": 0.1,
         "hint":   (
             "Current job title, current employer, NHS band (if stated), a brief personal "
             "statement or career objective, and any headline facts the candidate leads with. "
@@ -58,7 +58,7 @@ SECTIONS: list[dict] = [
     {
         "key":    "specialties",
         "label":  "Specialties",
-        "weight": 0.25,
+        "weight": 0.3,
         "hint":   (
             "Clinical or professional specialisms and sub-specialisms the candidate focuses on "
             "(e.g. critical care, theatres, oncology, CAMHS, community nursing, radiology, A&E, "
@@ -97,8 +97,8 @@ assert abs(sum(s["weight"] for s in SECTIONS) - 1.0) < 1e-6, "Section weights mu
 SECTION_KEYS = [s["key"] for s in SECTIONS]
 
 # Within each section: inner dense/sparse weighting
-DENSE_WEIGHT  = 0.7
-SPARSE_WEIGHT = 0.3
+DENSE_WEIGHT  = 1.0
+SPARSE_WEIGHT = 0.0
 
 ml_models  = {}
 db_clients = {}
@@ -513,6 +513,12 @@ class CandidateResult(BaseModel):
     match_percentage: float
     section_scores:   list[SectionScore]
     ai_summary:       str
+    sections:         dict[str, str] = {}
+
+
+class SearchResponse(BaseModel):
+    jd_sections: dict[str, str]
+    results:     list[CandidateResult]
 
 
 # ── 8. Ingest ─────────────────────────────────────────────────────────────────
@@ -597,7 +603,7 @@ async def ingest_candidate(
 
 # ── 9. Search ─────────────────────────────────────────────────────────────────
 
-@app.post("/search", response_model=list[CandidateResult], summary="Search candidates by job description")
+@app.post("/search", response_model=SearchResponse, summary="Search candidates by job description")
 async def search_candidates(request: SearchRequest):
     if not request.job_description.strip():
         raise HTTPException(status_code=400, detail="job_description cannot be empty.")
@@ -773,6 +779,7 @@ async def search_candidates(request: SearchRequest):
                 match_percentage=overall_pct,
                 section_scores=section_score_list,
                 ai_summary=crm.get("ai_summary", ""),
+                sections=crm.get("sections", {}),
             ))
         else:
             results.append(CandidateResult(
@@ -785,9 +792,10 @@ async def search_candidates(request: SearchRequest):
                 match_percentage=overall_pct,
                 section_scores=section_score_list,
                 ai_summary="",
+                sections={},
             ))
 
-    return results
+    return SearchResponse(jd_sections=jd_sections, results=results)
 
 
 # ── 10. Delete ────────────────────────────────────────────────────────────────

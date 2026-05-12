@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 
 const API_BASE = "http://localhost:8000";
 
@@ -68,6 +68,38 @@ function Badge({ text, color }) {
   );
 }
 
+function SectionBlock({ title, text }) {
+  return (
+    <div style={{
+      border: "0.5px solid var(--color-border-tertiary)",
+      borderRadius: 10,
+      padding: "10px 12px",
+      background: "var(--color-background-secondary)",
+    }}>
+      <div style={{ fontSize: 11, fontWeight: 600, color: "var(--color-text-tertiary)", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.4 }}>
+        {title}
+      </div>
+      <div style={{ fontSize: 13, lineHeight: 1.6, color: "var(--color-text-secondary)", whiteSpace: "pre-wrap" }}>
+        {text || "Not specified."}
+      </div>
+    </div>
+  );
+}
+
+function SectionBreakdown({ title, sections }) {
+  if (!sections) return null;
+  return (
+    <div style={{ marginTop: 14 }}>
+      <p style={{ margin: "0 0 10px", fontSize: 12, fontWeight: 600, color: "var(--color-text-secondary)" }}>{title}</p>
+      <div style={{ display: "grid", gap: 8 }}>
+        {["profile", "qualifications", "specialties", "experience", "skills"].map(key => (
+          <SectionBlock key={key} title={key} text={sections[key]} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function Alert({ type, message }) {
   const styles = {
     success: { bg: "#eaf3de", color: "#3b6d11", icon: "ti-check" },
@@ -88,6 +120,7 @@ function Alert({ type, message }) {
 
 function CandidateCard({ result, rank }) {
   const [expanded, setExpanded] = useState(false);
+  const [showSections, setShowSections] = useState(false);
   const mc = getMatchColor(result.match_percentage);
   const av = getAvatarColor(result.name);
   return (
@@ -155,10 +188,27 @@ function CandidateCard({ result, rank }) {
               {result.ai_summary}
             </div>
           )}
+          {result.sections && Object.keys(result.sections).length > 0 && (
+            <div style={{ marginTop: 10 }}>
+              <button onClick={() => setShowSections(s => !s)} style={{
+                fontSize: 12, color: "var(--color-text-secondary)", background: "none",
+                border: "none", cursor: "pointer", padding: 0, display: "flex", alignItems: "center", gap: 4,
+              }}>
+                <i className={`ti ${showSections ? "ti-chevron-up" : "ti-chevron-down"}`} style={{ fontSize: 13 }} aria-hidden="true" />
+                {showSections ? "Hide" : "Show"} CV sectioning
+              </button>
+              {showSections && <SectionBreakdown title="How this CV was sectioned" sections={result.sections} />}
+            </div>
+          )}
         </div>
       </div>
     </div>
   );
+}
+
+function SearchSummary({ jdSections }) {
+  if (!jdSections) return null;
+  return <SectionBreakdown title="How this job description was sectioned" sections={jdSections} />;
 }
 
 // ── Match % bar chart ─────────────────────────────────────────────────────────
@@ -194,20 +244,23 @@ function SearchTab() {
   const [jd, setJd] = useState("");
   const [topK, setTopK] = useState(5);
   const [results, setResults] = useState([]);
+  const [jdSections, setJdSections] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [searched, setSearched] = useState(false);
 
   const handleSearch = async () => {
     if (!jd.trim()) { setError("Please enter a job description."); return; }
-    setLoading(true); setError(""); setResults([]); setSearched(false);
+    setLoading(true); setError(""); setResults([]); setJdSections(null); setSearched(false);
     try {
       const resp = await fetch(`${API_BASE}/search`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ job_description: jd, top_k: topK }),
       });
       if (!resp.ok) throw new Error((await resp.json()).detail || "Search failed");
-      setResults(await resp.json());
+      const data = await resp.json();
+      setResults(data.results || []);
+      setJdSections(data.jd_sections || null);
       setSearched(true);
     } catch (e) { setError(e.message); }
     finally { setLoading(false); }
@@ -249,6 +302,7 @@ function SearchTab() {
               {results.length > 0 ? `${results.length} candidates found` : "No candidates matched"}
             </p>
           </div>
+          <SearchSummary jdSections={jdSections} />
           {results.length > 0 && <MatchChart results={results} />}
           <div style={{ display: "grid", gap: 12 }}>
             {results.map((r, i) => <CandidateCard key={r.crm_id} result={r} rank={i + 1} />)}
@@ -261,97 +315,56 @@ function SearchTab() {
 
 // ── Ingest Tab ────────────────────────────────────────────────────────────────
 function IngestTab({ onSuccess }) {
-  const [form, setForm] = useState({
-    crm_id: "", name: "", email: "", phone: "", location: "",
-    job_title: "", nhs_band: "Band 6", years_exp: "", specialisms: [],
-    availability: "", salary_exp: "", registration: "", notes: "",
-  });
+  const [name, setName] = useState("");
   const [cvFile, setCvFile] = useState(null);
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState(null);
-
-  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
-  const toggleSpec = (s) => set("specialisms", form.specialisms.includes(s) ? form.specialisms.filter(x => x !== s) : [...form.specialisms, s]);
+  const [sections, setSections] = useState(null);
 
   const handleSubmit = async () => {
-    if (!form.name.trim() || !form.crm_id.trim()) {
-      setStatus({ type: "error", message: "CRM ID and Name are required." }); return;
+    if (!name.trim()) {
+      setStatus({ type: "error", message: "Candidate name is required." });
+      return;
+    }
+    if (!cvFile) {
+      setStatus({ type: "error", message: "Please upload a PDF CV." });
+      return;
     }
     setLoading(true); setStatus(null);
     try {
       const fd = new FormData();
-      fd.append("profile_data", JSON.stringify({ ...form, years_exp: Number(form.years_exp) || 0 }));
-      if (cvFile) fd.append("cv_file", cvFile);
+      fd.append("name", name.trim());
+      fd.append("cv_file", cvFile);
       const resp = await fetch(`${API_BASE}/ingest`, { method: "POST", body: fd });
       if (!resp.ok) throw new Error((await resp.json()).detail || "Ingest failed");
       const data = await resp.json();
-      setStatus({ type: "success", message: `${data.name} ingested successfully. Milvus ID: ${data.milvus_id}` });
-      setForm({ crm_id: "", name: "", email: "", phone: "", location: "", job_title: "", nhs_band: "Band 6", years_exp: "", specialisms: [], availability: "", salary_exp: "", registration: "", notes: "" });
+      setName("");
       setCvFile(null);
+      setSections(data.sections || null);
+      setStatus({
+        type: "success",
+        message: `${data.name} ingested successfully. Milvus ID: ${data.milvus_id}`,
+      });
       onSuccess();
     } catch (e) { setStatus({ type: "error", message: e.message }); }
     finally { setLoading(false); }
   };
 
-  const f = (label, key, placeholder, type = "text") => (
-    <div>
-      <label style={{ fontSize: 12, color: "var(--color-text-secondary)", display: "block", marginBottom: 4 }}>{label}</label>
-      <input type={type} value={form[key]} onChange={e => set(key, e.target.value)}
-        placeholder={placeholder} style={{ width: "100%", boxSizing: "border-box" }} />
-    </div>
-  );
-
   return (
     <div style={{ display: "grid", gap: 16 }}>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-        {f("CRM ID *", "crm_id", "e.g. CRM-100")}
-        {f("Full name *", "name", "e.g. Sarah Mitchell")}
-        {f("Email", "email", "candidate@example.com", "email")}
-        {f("Phone", "phone", "07700 000000")}
-        {f("Location", "location", "e.g. Manchester, Greater Manchester")}
-        {f("Job title", "job_title", "e.g. Senior Staff Nurse")}
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
-        <div>
-          <label style={{ fontSize: 12, color: "var(--color-text-secondary)", display: "block", marginBottom: 4 }}>NHS band</label>
-          <select value={form.nhs_band} onChange={e => set("nhs_band", e.target.value)} style={{ width: "100%", boxSizing: "border-box" }}>
-            {NHS_BANDS.map(b => <option key={b}>{b}</option>)}
-          </select>
-        </div>
-        {f("Years exp.", "years_exp", "e.g. 8", "number")}
-        {f("Salary expectation", "salary_exp", "e.g. £35,000–£42,000")}
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-        {f("Registration", "registration", "e.g. NMC PIN: 12A3456B")}
-        {f("Availability", "availability", "e.g. Immediately available")}
+      <div>
+        <label style={{ fontSize: 12, color: "var(--color-text-secondary)", display: "block", marginBottom: 4 }}>Full name *</label>
+        <input
+          type="text"
+          value={name}
+          onChange={e => setName(e.target.value)}
+          placeholder="e.g. Sarah Mitchell"
+          style={{ width: "100%", boxSizing: "border-box" }}
+        />
       </div>
 
       <div>
-        <label style={{ fontSize: 12, color: "var(--color-text-secondary)", display: "block", marginBottom: 8 }}>Specialisms</label>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-          {SPECIALISMS.map(s => (
-            <button key={s} onClick={() => toggleSpec(s)} style={{
-              padding: "4px 10px", borderRadius: 6, fontSize: 12, cursor: "pointer",
-              border: form.specialisms.includes(s) ? "1.5px solid #185fa5" : "0.5px solid var(--color-border-tertiary)",
-              background: form.specialisms.includes(s) ? "#e6f1fb" : "var(--color-background-secondary)",
-              color: form.specialisms.includes(s) ? "#185fa5" : "var(--color-text-secondary)",
-              fontWeight: form.specialisms.includes(s) ? 500 : 400,
-            }}>{s}</button>
-          ))}
-        </div>
-      </div>
-
-      <div>
-        <label style={{ fontSize: 12, color: "var(--color-text-secondary)", display: "block", marginBottom: 4 }}>Additional notes</label>
-        <textarea value={form.notes} onChange={e => set("notes", e.target.value)}
-          placeholder="Additional context, qualifications, achievements…" rows={3}
-          style={{ width: "100%", boxSizing: "border-box", fontFamily: "var(--font-sans)", fontSize: 13 }} />
-      </div>
-
-      <div>
-        <label style={{ fontSize: 12, color: "var(--color-text-secondary)", display: "block", marginBottom: 4 }}>CV file (PDF, optional)</label>
+        <label style={{ fontSize: 12, color: "var(--color-text-secondary)", display: "block", marginBottom: 4 }}>CV file (PDF, required)</label>
         <div style={{
           border: "0.5px dashed var(--color-border-secondary)", borderRadius: 8, padding: "14px 16px",
           display: "flex", alignItems: "center", gap: 10, cursor: "pointer",
@@ -359,14 +372,18 @@ function IngestTab({ onSuccess }) {
         }} onClick={() => document.getElementById("cv-upload").click()}>
           <i className="ti ti-file-text" style={{ fontSize: 20, color: "var(--color-text-tertiary)" }} aria-hidden="true" />
           <span style={{ fontSize: 13, color: "var(--color-text-secondary)" }}>
-            {cvFile ? cvFile.name : "Click to upload PDF CV — Gemini will summarise it automatically"}
+            {cvFile ? cvFile.name : "Click to upload PDF CV"}
           </span>
-          <input id="cv-upload" type="file" accept=".pdf" style={{ display: "none" }}
+          <input id="cv-upload" type="file" accept="application/pdf,.pdf" required style={{ display: "none" }}
             onChange={e => setCvFile(e.target.files[0] || null)} />
         </div>
       </div>
 
       {status && <Alert type={status.type} message={status.message} />}
+
+      {status?.type === "success" && sections && (
+        <SectionBreakdown title="How this CV was sectioned" sections={sections} />
+      )}
 
       <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
         <button onClick={handleSubmit} disabled={loading} style={{
@@ -399,9 +416,13 @@ function CrmTab({ refresh }) {
     finally { setLoading(false); }
   }, []);
 
-  useState(() => { load(); }, []);
-  // reload when refresh token changes
-  useState(() => { if (refresh > 0) load(); }, [refresh]);
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  useEffect(() => {
+    if (refresh > 0) load();
+  }, [refresh, load]);
 
   const handleDelete = async (crm_id, name) => {
     if (!window.confirm(`Remove ${name} from the system?`)) return;
