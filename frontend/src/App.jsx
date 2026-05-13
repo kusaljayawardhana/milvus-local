@@ -2,24 +2,7 @@ import { useState, useCallback, useEffect } from "react";
 
 const API_BASE = "http://localhost:8000";
 
-const NHS_BANDS = [
-  "Band 2", "Band 3", "Band 4", "Band 5", "Band 6", "Band 7", "Band 8a",
-  "Band 8b", "Band 8c", "Band 8d", "Band 9", "SAS Grade", "Specialty Registrar",
-  "Consultant", "GP Principal", "Other"
-];
-
-const SPECIALISMS = [
-  "Adult Critical Care", "ICU", "A&E / Emergency Medicine", "Paediatrics", "CAMHS",
-  "District Nursing", "Community Nursing", "General Practice", "Mental Health",
-  "Psychiatry", "Forensic Psychiatry", "Musculoskeletal", "Physiotherapy",
-  "Occupational Therapy", "Radiology", "Interventional Radiology",
-  "Operating Department", "Anaesthetics", "Cardiology", "Respiratory",
-  "Orthopaedics", "Stroke Rehabilitation", "Palliative Care", "Oncology",
-  "Diabetes Management", "Wound Care", "Prescribing", "Pre-hospital Care",
-  "HEMS", "Internal Medicine", "Endocrinology", "Neurology", "Renal",
-  "Gastroenterology", "Infectious Diseases", "Midwifery", "Neonatal",
-];
-
+// ── Helpers ───────────────────────────────────────────────────────────────────
 function getInitials(name) {
   return name.split(" ").map(n => n[0]).slice(0, 2).join("").toUpperCase();
 }
@@ -39,7 +22,7 @@ function getAvatarColor(name) {
   return colors[name.charCodeAt(0) % colors.length];
 }
 
-// ── Components ────────────────────────────────────────────────────────────────
+// ── Shared components ─────────────────────────────────────────────────────────
 
 function Tabs({ tabs, active, onChange }) {
   return (
@@ -68,67 +51,56 @@ function Badge({ text, color }) {
   );
 }
 
-function SectionBlock({ title, text }) {
-  return (
-    <div style={{
-      border: "0.5px solid var(--color-border-tertiary)",
-      borderRadius: 10,
-      padding: "10px 12px",
-      background: "var(--color-background-secondary)",
-    }}>
-      <div style={{ fontSize: 11, fontWeight: 600, color: "var(--color-text-tertiary)", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.4 }}>
-        {title}
-      </div>
-      <div style={{ fontSize: 13, lineHeight: 1.6, color: "var(--color-text-secondary)", whiteSpace: "pre-wrap" }}>
-        {text || "Not specified."}
-      </div>
-    </div>
-  );
-}
-
-function SectionBreakdown({ title, sections }) {
-  if (!sections) return null;
-  return (
-    <div style={{ marginTop: 14 }}>
-      <p style={{ margin: "0 0 10px", fontSize: 12, fontWeight: 600, color: "var(--color-text-secondary)" }}>{title}</p>
-      <div style={{ display: "grid", gap: 8 }}>
-        {["profile", "qualifications", "specialties", "experience", "skills"].map(key => (
-          <SectionBlock key={key} title={key} text={sections[key]} />
-        ))}
-      </div>
-    </div>
-  );
-}
-
 function Alert({ type, message }) {
   const styles = {
     success: { bg: "#eaf3de", color: "#3b6d11", icon: "ti-check" },
-    error: { bg: "#fcebeb", color: "#a32d2d", icon: "ti-alert-circle" },
-    info: { bg: "#e6f1fb", color: "#185fa5", icon: "ti-info-circle" },
+    error:   { bg: "#fcebeb", color: "#a32d2d", icon: "ti-alert-circle" },
+    info:    { bg: "#e6f1fb", color: "#185fa5", icon: "ti-info-circle" },
   };
   const s = styles[type] || styles.info;
   return (
     <div style={{
       background: s.bg, color: s.color, borderRadius: 8, padding: "10px 14px",
-      fontSize: 13, display: "flex", alignItems: "center", gap: 8, marginTop: 12,
+      fontSize: 13, display: "flex", alignItems: "flex-start", gap: 8, marginTop: 12,
     }}>
-      <i className={`ti ${s.icon}`} style={{ fontSize: 16 }} aria-hidden="true" />
-      {message}
+      <i className={`ti ${s.icon}`} style={{ fontSize: 16, flexShrink: 0, marginTop: 1 }} aria-hidden="true" />
+      <span style={{ lineHeight: 1.5 }}>{message}</span>
     </div>
   );
 }
 
+// ── Section score bar (used inside CandidateCard) ─────────────────────────────
+function SectionScoreBar({ label, score, weight }) {
+  const mc = getMatchColor(score);
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+      <span style={{ width: 130, flexShrink: 0, color: "var(--color-text-secondary)" }}>
+        {label}
+        <span style={{ color: "var(--color-text-tertiary)", fontWeight: 400 }}> · {Math.round(weight * 100)}%</span>
+      </span>
+      <div style={{ flex: 1, background: "var(--color-background-secondary)", borderRadius: 3, height: 6, overflow: "hidden" }}>
+        <div style={{ width: `${score}%`, background: mc.border, height: "100%", borderRadius: 3, transition: "width 0.5s ease" }} />
+      </div>
+      <span style={{ width: 36, textAlign: "right", fontWeight: 500, color: mc.color, flexShrink: 0 }}>{score}%</span>
+    </div>
+  );
+}
+
+// ── Candidate result card ─────────────────────────────────────────────────────
 function CandidateCard({ result, rank }) {
   const [expanded, setExpanded] = useState(false);
   const [showSections, setShowSections] = useState(false);
   const mc = getMatchColor(result.match_percentage);
   const av = getAvatarColor(result.name);
+
   return (
     <div style={{
-      background: "var(--color-background-primary)", border: "0.5px solid var(--color-border-tertiary)",
-      borderRadius: 12, padding: "16px 20px", transition: "border-color 0.15s",
+      background: "var(--color-background-primary)",
+      border: "0.5px solid var(--color-border-tertiary)",
+      borderRadius: 12, padding: "16px 20px",
     }}>
       <div style={{ display: "flex", alignItems: "flex-start", gap: 14 }}>
+        {/* Avatar */}
         <div style={{ position: "relative", flexShrink: 0 }}>
           <div style={{
             width: 46, height: 46, borderRadius: "50%", background: av.bg,
@@ -143,7 +115,10 @@ function CandidateCard({ result, rank }) {
             fontSize: 10, fontWeight: 600, color: "var(--color-text-secondary)",
           }}>#{rank}</div>
         </div>
+
+        {/* Main info */}
         <div style={{ flex: 1, minWidth: 0 }}>
+          {/* Name row */}
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 4 }}>
             <span style={{ fontWeight: 500, fontSize: 15 }}>{result.name}</span>
             <Badge text={result.crm_id} />
@@ -155,49 +130,75 @@ function CandidateCard({ result, rank }) {
               {result.match_percentage}% match
             </div>
           </div>
+
+          {/* Job title / band / location */}
           <div style={{ fontSize: 13, color: "var(--color-text-secondary)", marginBottom: 8 }}>
-            {result.job_title}{result.nhs_band ? ` · ${result.nhs_band}` : ""}
+            {result.job_title}
+            {result.nhs_band ? ` · ${result.nhs_band}` : ""}
             {result.location ? ` · ` : ""}
-            {result.location && <><i className="ti ti-map-pin" style={{ fontSize: 13, verticalAlign: -1 }} aria-hidden="true" /> {result.location}</>}
+            {result.location && (
+              <><i className="ti ti-map-pin" style={{ fontSize: 13, verticalAlign: -1 }} aria-hidden="true" /> {result.location}</>
+            )}
           </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
-            {result.years_exp > 0 && <Badge text={`${result.years_exp} yrs exp`} />}
-            {result.availability && <Badge text={result.availability} color={{ bg: "#e1f5ee", color: "#0f6e56", border: "#1d9e75" }} />}
-            {result.salary_exp && <Badge text={result.salary_exp} />}
-            {(result.specialisms || []).slice(0, 3).map(s => <Badge key={s} text={s} />)}
-            {(result.specialisms || []).length > 3 && <Badge text={`+${result.specialisms.length - 3} more`} />}
+
+          {/* Domain + registration row */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 8, fontSize: 12 }}>
+            {result.profession_domain && (
+              <span style={{
+                padding: "1px 7px", borderRadius: 5, fontWeight: 500,
+                background: "#eeedfe", color: "#534ab7", border: "0.5px solid #c4c0f5",
+              }}>
+                {result.profession_domain.replace(/_/g, " ")}
+              </span>
+            )}
+            {result.registration && (
+              <span style={{ color: "var(--color-text-tertiary)" }}>
+                <i className="ti ti-id-badge" style={{ fontSize: 12, verticalAlign: -1 }} aria-hidden="true" /> {result.registration}
+              </span>
+            )}
           </div>
-          {result.registration && (
-            <div style={{ fontSize: 12, color: "var(--color-text-tertiary)", marginBottom: 8 }}>
-              <i className="ti ti-id-badge" style={{ fontSize: 13, verticalAlign: -1 }} aria-hidden="true" /> {result.registration}
-            </div>
-          )}
-          <button onClick={() => setExpanded(e => !e)} style={{
-            fontSize: 12, color: "var(--color-text-secondary)", background: "none",
-            border: "none", cursor: "pointer", padding: 0, display: "flex", alignItems: "center", gap: 4,
-          }}>
-            <i className={`ti ${expanded ? "ti-chevron-up" : "ti-chevron-down"}`} style={{ fontSize: 13 }} aria-hidden="true" />
-            {expanded ? "Hide" : "Show"} AI summary
-          </button>
-          {expanded && (
+
+          {/* Toggle buttons */}
+          <div style={{ display: "flex", gap: 14 }}>
+            <button onClick={() => setShowSections(s => !s)} style={{
+              fontSize: 12, color: "var(--color-text-secondary)", background: "none",
+              border: "none", cursor: "pointer", padding: 0, display: "flex", alignItems: "center", gap: 4,
+            }}>
+              <i className={`ti ${showSections ? "ti-chevron-up" : "ti-chevron-down"}`} style={{ fontSize: 13 }} aria-hidden="true" />
+              {showSections ? "Hide" : "Show"} section scores
+            </button>
+            <button onClick={() => setExpanded(e => !e)} style={{
+              fontSize: 12, color: "var(--color-text-secondary)", background: "none",
+              border: "none", cursor: "pointer", padding: 0, display: "flex", alignItems: "center", gap: 4,
+            }}>
+              <i className={`ti ${expanded ? "ti-chevron-up" : "ti-chevron-down"}`} style={{ fontSize: 13 }} aria-hidden="true" />
+              {expanded ? "Hide" : "Show"} AI summary
+            </button>
+          </div>
+
+          {/* Section score breakdown */}
+          {showSections && result.section_scores?.length > 0 && (
             <div style={{
-              marginTop: 10, padding: "10px 14px", background: "var(--color-background-secondary)",
-              borderRadius: 8, fontSize: 13, color: "var(--color-text-secondary)", lineHeight: 1.6,
+              marginTop: 10, padding: "10px 14px",
+              background: "var(--color-background-secondary)",
+              borderRadius: 8, display: "grid", gap: 6,
               borderLeft: "2px solid var(--color-border-secondary)",
             }}>
-              {result.ai_summary}
+              {result.section_scores.map(s => (
+                <SectionScoreBar key={s.key} label={s.label} score={s.score} weight={s.weight} />
+              ))}
             </div>
           )}
-          {result.sections && Object.keys(result.sections).length > 0 && (
-            <div style={{ marginTop: 10 }}>
-              <button onClick={() => setShowSections(s => !s)} style={{
-                fontSize: 12, color: "var(--color-text-secondary)", background: "none",
-                border: "none", cursor: "pointer", padding: 0, display: "flex", alignItems: "center", gap: 4,
-              }}>
-                <i className={`ti ${showSections ? "ti-chevron-up" : "ti-chevron-down"}`} style={{ fontSize: 13 }} aria-hidden="true" />
-                {showSections ? "Hide" : "Show"} CV sectioning
-              </button>
-              {showSections && <SectionBreakdown title="How this CV was sectioned" sections={result.sections} />}
+
+          {/* AI summary */}
+          {expanded && (
+            <div style={{
+              marginTop: 10, padding: "10px 14px",
+              background: "var(--color-background-secondary)",
+              borderRadius: 8, fontSize: 13, color: "var(--color-text-secondary)",
+              lineHeight: 1.6, borderLeft: "2px solid var(--color-border-secondary)",
+            }}>
+              {result.ai_summary}
             </div>
           )}
         </div>
@@ -206,24 +207,22 @@ function CandidateCard({ result, rank }) {
   );
 }
 
-function SearchSummary({ jdSections }) {
-  if (!jdSections) return null;
-  return <SectionBreakdown title="How this job description was sectioned" sections={jdSections} />;
-}
-
-// ── Match % bar chart ─────────────────────────────────────────────────────────
+// ── Match % overview bar chart ────────────────────────────────────────────────
 function MatchChart({ results }) {
   if (!results.length) return null;
   return (
     <div style={{ marginBottom: 20 }}>
       <p style={{ fontSize: 12, color: "var(--color-text-tertiary)", marginBottom: 8, marginTop: 0 }}>
-        Semantic match scores
+        Overall match scores
       </p>
-      {results.map((r, i) => {
+      {results.map(r => {
         const mc = getMatchColor(r.match_percentage);
         return (
           <div key={r.crm_id} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
-            <span style={{ fontSize: 12, color: "var(--color-text-secondary)", width: 120, flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            <span style={{
+              fontSize: 12, color: "var(--color-text-secondary)",
+              width: 120, flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+            }}>
               {r.name.split(" ")[0]}
             </span>
             <div style={{ flex: 1, background: "var(--color-background-secondary)", borderRadius: 4, height: 8, overflow: "hidden" }}>
@@ -239,19 +238,19 @@ function MatchChart({ results }) {
   );
 }
 
-// ── Search Tab ────────────────────────────────────────────────────────────────
+// ── Search tab ────────────────────────────────────────────────────────────────
 function SearchTab() {
   const [jd, setJd] = useState("");
   const [topK, setTopK] = useState(5);
   const [results, setResults] = useState([]);
-  const [jdSections, setJdSections] = useState(null);
+  const [jdDomain, setJdDomain] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [searched, setSearched] = useState(false);
 
   const handleSearch = async () => {
     if (!jd.trim()) { setError("Please enter a job description."); return; }
-    setLoading(true); setError(""); setResults([]); setJdSections(null); setSearched(false);
+    setLoading(true); setError(""); setResults([]); setSearched(false);
     try {
       const resp = await fetch(`${API_BASE}/search`, {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -260,7 +259,7 @@ function SearchTab() {
       if (!resp.ok) throw new Error((await resp.json()).detail || "Search failed");
       const data = await resp.json();
       setResults(data.results || []);
-      setJdSections(data.jd_sections || null);
+      setJdDomain(data.jd_domain || "");
       setSearched(true);
     } catch (e) { setError(e.message); }
     finally { setLoading(false); }
@@ -272,7 +271,7 @@ function SearchTab() {
         <label style={{ fontSize: 13, fontWeight: 500 }}>Job description</label>
         <textarea
           value={jd} onChange={e => setJd(e.target.value)}
-          placeholder="Paste a UK healthcare job description here…&#10;&#10;Example: We are seeking a Band 6 ICU Staff Nurse for a busy NHS teaching hospital in Manchester. The successful candidate must hold current NMC registration and have at least 3 years of adult critical care experience including ventilator management and sepsis protocols..."
+          placeholder={"Paste a UK healthcare job description here…\n\nExample: We are seeking a Band 6 ICU Staff Nurse for a busy NHS teaching hospital in Manchester. The successful candidate must hold current NMC registration and have at least 3 years of adult critical care experience including ventilator management and sepsis protocols…"}
           rows={8}
           style={{ width: "100%", resize: "vertical", boxSizing: "border-box", fontFamily: "var(--font-sans)", fontSize: 13, lineHeight: 1.6 }}
         />
@@ -288,7 +287,9 @@ function SearchTab() {
             fontWeight: 500, fontSize: 14, cursor: loading ? "wait" : "pointer",
             opacity: loading ? 0.7 : 1, display: "flex", alignItems: "center", gap: 8,
           }}>
-            {loading ? <><i className="ti ti-loader-2" style={{ fontSize: 16 }} aria-hidden="true" /> Searching…</> : <><i className="ti ti-search" style={{ fontSize: 16 }} aria-hidden="true" /> Find candidates</>}
+            {loading
+              ? <><i className="ti ti-loader-2" style={{ fontSize: 16 }} aria-hidden="true" /> Searching…</>
+              : <><i className="ti ti-search" style={{ fontSize: 16 }} aria-hidden="true" /> Find candidates</>}
           </button>
         </div>
       </div>
@@ -297,12 +298,19 @@ function SearchTab() {
 
       {searched && (
         <div style={{ marginTop: 20 }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
             <p style={{ margin: 0, fontWeight: 500 }}>
               {results.length > 0 ? `${results.length} candidates found` : "No candidates matched"}
             </p>
+            {jdDomain && (
+              <span style={{
+                fontSize: 11, fontWeight: 500, padding: "2px 8px", borderRadius: 6,
+                background: "#e6f1fb", color: "#185fa5", border: "0.5px solid #a8cfef",
+              }}>
+                JD domain: {jdDomain.replace(/_/g, " ")}
+              </span>
+            )}
           </div>
-          <SearchSummary jdSections={jdSections} />
           {results.length > 0 && <MatchChart results={results} />}
           <div style={{ display: "grid", gap: 12 }}>
             {results.map((r, i) => <CandidateCard key={r.crm_id} result={r} rank={i + 1} />)}
@@ -313,22 +321,19 @@ function SearchTab() {
   );
 }
 
-// ── Ingest Tab ────────────────────────────────────────────────────────────────
+// ── Ingest tab ────────────────────────────────────────────────────────────────
 function IngestTab({ onSuccess }) {
   const [name, setName] = useState("");
   const [cvFile, setCvFile] = useState(null);
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState(null);
-  const [sections, setSections] = useState(null);
 
   const handleSubmit = async () => {
     if (!name.trim()) {
-      setStatus({ type: "error", message: "Candidate name is required." });
-      return;
+      setStatus({ type: "error", message: "Please enter the candidate's name." }); return;
     }
     if (!cvFile) {
-      setStatus({ type: "error", message: "Please upload a PDF CV." });
-      return;
+      setStatus({ type: "error", message: "Please upload a CV PDF." }); return;
     }
     setLoading(true); setStatus(null);
     try {
@@ -338,68 +343,125 @@ function IngestTab({ onSuccess }) {
       const resp = await fetch(`${API_BASE}/ingest`, { method: "POST", body: fd });
       if (!resp.ok) throw new Error((await resp.json()).detail || "Ingest failed");
       const data = await resp.json();
-      setName("");
-      setCvFile(null);
-      setSections(data.sections || null);
       setStatus({
         type: "success",
-        message: `${data.name} ingested successfully. Milvus ID: ${data.milvus_id}`,
+        message: `${data.name} ingested successfully · ${data.crm_id} · ${data.extracted?.job_title || "role extracted"} · ${data.extracted?.nhs_band || ""}`,
       });
+      setName("");
+      setCvFile(null);
+      document.getElementById("cv-upload").value = "";
       onSuccess();
-    } catch (e) { setStatus({ type: "error", message: e.message }); }
-    finally { setLoading(false); }
+    } catch (e) {
+      setStatus({ type: "error", message: e.message });
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
-    <div style={{ display: "grid", gap: 16 }}>
+    <div style={{ display: "grid", gap: 20, maxWidth: 520 }}>
+      {/* Info banner */}
+      <div style={{
+        background: "var(--color-background-secondary)", borderRadius: 8,
+        padding: "10px 14px", fontSize: 13, color: "var(--color-text-secondary)",
+        display: "flex", gap: 8, alignItems: "flex-start",
+        border: "0.5px solid var(--color-border-tertiary)",
+      }}>
+        <i className="ti ti-sparkles" style={{ fontSize: 15, flexShrink: 0, marginTop: 1 }} aria-hidden="true" />
+        <span>Gemini will automatically extract job title, NHS band, location, registration, specialties, skills and experience directly from the CV.</span>
+      </div>
+
+      {/* Name field */}
       <div>
-        <label style={{ fontSize: 12, color: "var(--color-text-secondary)", display: "block", marginBottom: 4 }}>Full name *</label>
+        <label style={{ fontSize: 13, fontWeight: 500, display: "block", marginBottom: 6 }}>
+          Candidate name <span style={{ color: "#a32d2d" }}>*</span>
+        </label>
         <input
           type="text"
           value={name}
           onChange={e => setName(e.target.value)}
           placeholder="e.g. Sarah Mitchell"
-          style={{ width: "100%", boxSizing: "border-box" }}
+          style={{ width: "100%", boxSizing: "border-box", fontSize: 14 }}
+          onKeyDown={e => e.key === "Enter" && handleSubmit()}
         />
       </div>
 
+      {/* CV upload */}
       <div>
-        <label style={{ fontSize: 12, color: "var(--color-text-secondary)", display: "block", marginBottom: 4 }}>CV file (PDF, required)</label>
-        <div style={{
-          border: "0.5px dashed var(--color-border-secondary)", borderRadius: 8, padding: "14px 16px",
-          display: "flex", alignItems: "center", gap: 10, cursor: "pointer",
-          background: "var(--color-background-secondary)",
-        }} onClick={() => document.getElementById("cv-upload").click()}>
-          <i className="ti ti-file-text" style={{ fontSize: 20, color: "var(--color-text-tertiary)" }} aria-hidden="true" />
-          <span style={{ fontSize: 13, color: "var(--color-text-secondary)" }}>
-            {cvFile ? cvFile.name : "Click to upload PDF CV"}
-          </span>
-          <input id="cv-upload" type="file" accept="application/pdf,.pdf" required style={{ display: "none" }}
-            onChange={e => setCvFile(e.target.files[0] || null)} />
+        <label style={{ fontSize: 13, fontWeight: 500, display: "block", marginBottom: 6 }}>
+          CV file (PDF) <span style={{ color: "#a32d2d" }}>*</span>
+        </label>
+        <div
+          style={{
+            border: cvFile
+              ? "0.5px solid #639922"
+              : "0.5px dashed var(--color-border-secondary)",
+            borderRadius: 8, padding: "16px",
+            display: "flex", alignItems: "center", gap: 12, cursor: "pointer",
+            background: cvFile ? "#eaf3de" : "var(--color-background-secondary)",
+            transition: "all 0.15s",
+          }}
+          onClick={() => document.getElementById("cv-upload").click()}
+        >
+          <i
+            className={`ti ${cvFile ? "ti-file-check" : "ti-file-upload"}`}
+            style={{ fontSize: 22, color: cvFile ? "#3b6d11" : "var(--color-text-tertiary)", flexShrink: 0 }}
+            aria-hidden="true"
+          />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            {cvFile ? (
+              <>
+                <div style={{ fontSize: 13, fontWeight: 500, color: "#3b6d11", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {cvFile.name}
+                </div>
+                <div style={{ fontSize: 11, color: "#639922", marginTop: 2 }}>
+                  {(cvFile.size / 1024).toFixed(0)} KB · click to change
+                </div>
+              </>
+            ) : (
+              <span style={{ fontSize: 13, color: "var(--color-text-secondary)" }}>
+                Click to upload PDF
+              </span>
+            )}
+          </div>
+          {cvFile && (
+            <button
+              onClick={e => { e.stopPropagation(); setCvFile(null); document.getElementById("cv-upload").value = ""; }}
+              style={{ background: "none", border: "none", cursor: "pointer", padding: 4, color: "#639922", display: "flex" }}
+              aria-label="Remove file"
+            >
+              <i className="ti ti-x" style={{ fontSize: 16 }} aria-hidden="true" />
+            </button>
+          )}
         </div>
+        <input
+          id="cv-upload" type="file" accept=".pdf" style={{ display: "none" }}
+          onChange={e => setCvFile(e.target.files[0] || null)}
+        />
       </div>
 
       {status && <Alert type={status.type} message={status.message} />}
 
-      {status?.type === "success" && sections && (
-        <SectionBreakdown title="How this CV was sectioned" sections={sections} />
-      )}
-
-      <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-        <button onClick={handleSubmit} disabled={loading} style={{
-          padding: "9px 22px", background: "var(--color-text-primary)",
+      <button
+        onClick={handleSubmit}
+        disabled={loading}
+        style={{
+          padding: "10px 24px", background: "var(--color-text-primary)",
           color: "var(--color-background-primary)", border: "none", borderRadius: 8,
           fontWeight: 500, fontSize: 14, cursor: loading ? "wait" : "pointer",
           opacity: loading ? 0.7 : 1, display: "flex", alignItems: "center", gap: 8,
-        }}>
-          {loading ? <><i className="ti ti-loader-2" style={{ fontSize: 16 }} aria-hidden="true" /> Processing…</> : <><i className="ti ti-cloud-upload" style={{ fontSize: 16 }} aria-hidden="true" /> Ingest candidate</>}
-        </button>
-      </div>
+          justifyContent: "center",
+        }}
+      >
+        {loading
+          ? <><i className="ti ti-loader-2" style={{ fontSize: 16 }} aria-hidden="true" /> Extracting &amp; ingesting…</>
+          : <><i className="ti ti-cloud-upload" style={{ fontSize: 16 }} aria-hidden="true" /> Ingest candidate</>}
+      </button>
     </div>
   );
 }
 
-// ── CRM Tab ───────────────────────────────────────────────────────────────────
+// ── CRM tab ───────────────────────────────────────────────────────────────────
 function CrmTab({ refresh }) {
   const [candidates, setCandidates] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -412,17 +474,15 @@ function CrmTab({ refresh }) {
       const resp = await fetch(`${API_BASE}/candidates`);
       const data = await resp.json();
       setCandidates(data.candidates || []);
-    } catch (e) { setStatus({ type: "error", message: e.message }); }
-    finally { setLoading(false); }
+    } catch (e) {
+      setStatus({ type: "error", message: e.message });
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
-  useEffect(() => {
-    load();
-  }, [load]);
-
-  useEffect(() => {
-    if (refresh > 0) load();
-  }, [refresh, load]);
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => { if (refresh > 0) load(); }, [refresh, load]);
 
   const handleDelete = async (crm_id, name) => {
     if (!window.confirm(`Remove ${name} from the system?`)) return;
@@ -432,52 +492,75 @@ function CrmTab({ refresh }) {
       if (!resp.ok) throw new Error((await resp.json()).detail);
       setStatus({ type: "success", message: `${name} removed.` });
       load();
-    } catch (e) { setStatus({ type: "error", message: e.message }); }
-    finally { setDeletingId(null); }
+    } catch (e) {
+      setStatus({ type: "error", message: e.message });
+    } finally {
+      setDeletingId(null);
+    }
   };
 
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
         <span style={{ fontSize: 13, color: "var(--color-text-secondary)" }}>
-          {loading ? "Loading…" : `${candidates.length} candidates in CRM`}
+          {loading ? "Loading…" : `${candidates.length} candidate${candidates.length !== 1 ? "s" : ""} in CRM`}
         </span>
-        <button onClick={load} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
+        <button onClick={load} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, background: "none", border: "0.5px solid var(--color-border-tertiary)", borderRadius: 6, padding: "5px 10px", cursor: "pointer", color: "var(--color-text-secondary)" }}>
           <i className="ti ti-refresh" style={{ fontSize: 14 }} aria-hidden="true" /> Refresh
         </button>
       </div>
+
       {status && <Alert type={status.type} message={status.message} />}
+
       <div style={{ display: "grid", gap: 8, marginTop: 12 }}>
         {candidates.map(c => {
           const av = getAvatarColor(c.name);
           return (
             <div key={c.crm_id} style={{
-              background: "var(--color-background-primary)", border: "0.5px solid var(--color-border-tertiary)",
-              borderRadius: 10, padding: "12px 16px", display: "flex", alignItems: "center", gap: 12,
+              background: "var(--color-background-primary)",
+              border: "0.5px solid var(--color-border-tertiary)",
+              borderRadius: 10, padding: "12px 16px",
+              display: "flex", alignItems: "center", gap: 12,
             }}>
               <div style={{
                 width: 38, height: 38, borderRadius: "50%", background: av.bg,
                 display: "flex", alignItems: "center", justifyContent: "center",
                 fontWeight: 500, fontSize: 13, color: av.color, flexShrink: 0,
               }}>{getInitials(c.name)}</div>
+
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                   <span style={{ fontWeight: 500, fontSize: 14 }}>{c.name}</span>
                   <Badge text={c.crm_id} />
                   {c.nhs_band && <Badge text={c.nhs_band} />}
                 </div>
                 <div style={{ fontSize: 12, color: "var(--color-text-secondary)", marginTop: 2 }}>
-                  {c.job_title}{c.location ? ` · ${c.location}` : ""}
+                  {c.job_title}
+                  {c.location ? ` · ` : ""}
+                  {c.location && (
+                    <><i className="ti ti-map-pin" style={{ fontSize: 12, verticalAlign: -1 }} aria-hidden="true" /> {c.location}</>
+                  )}
+                  {c.registration && (
+                    <span style={{ marginLeft: 8, color: "var(--color-text-tertiary)" }}>
+                      <i className="ti ti-id-badge" style={{ fontSize: 12, verticalAlign: -1 }} aria-hidden="true" /> {c.registration}
+                    </span>
+                  )}
                 </div>
               </div>
+
               <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
-                {c.availability && <span style={{ fontSize: 11, color: "var(--color-text-tertiary)" }}>{c.availability}</span>}
-                <button onClick={() => handleDelete(c.crm_id, c.name)} disabled={deletingId === c.crm_id}
+                <span style={{ fontSize: 11, color: "var(--color-text-tertiary)" }}>
+                  {new Date(c.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}
+                </span>
+                <button
+                  onClick={() => handleDelete(c.crm_id, c.name)}
+                  disabled={deletingId === c.crm_id}
                   style={{
                     background: "none", border: "0.5px solid var(--color-border-tertiary)",
                     borderRadius: 6, padding: "4px 8px", cursor: "pointer",
                     color: "#a32d2d", fontSize: 12, display: "flex", alignItems: "center", gap: 4,
-                  }}>
+                  }}
+                >
                   <i className="ti ti-trash" style={{ fontSize: 13 }} aria-hidden="true" />
                   {deletingId === c.crm_id ? "Removing…" : "Remove"}
                 </button>
@@ -485,8 +568,9 @@ function CrmTab({ refresh }) {
             </div>
           );
         })}
+
         {!loading && candidates.length === 0 && (
-          <div style={{ textAlign: "center", padding: "40px 0", color: "var(--color-text-tertiary)" }}>
+          <div style={{ textAlign: "center", padding: "48px 0", color: "var(--color-text-tertiary)" }}>
             <i className="ti ti-database-off" style={{ fontSize: 32, display: "block", marginBottom: 8 }} aria-hidden="true" />
             No candidates ingested yet. Use the Ingest tab to add candidates.
           </div>
@@ -496,14 +580,14 @@ function CrmTab({ refresh }) {
   );
 }
 
-// ── Main App ──────────────────────────────────────────────────────────────────
+// ── App shell ─────────────────────────────────────────────────────────────────
 export default function App() {
   const [tab, setTab] = useState("search");
   const [refreshCrm, setRefreshCrm] = useState(0);
 
   return (
     <div style={{ maxWidth: 780, margin: "0 auto", padding: "24px 20px" }}>
-      <h2 className="sr-only">Healthcare CV semantic search prototype</h2>
+      <h2 className="sr-only">Healthcare CV semantic search</h2>
 
       {/* Header */}
       <div style={{ marginBottom: 28 }}>
@@ -515,12 +599,14 @@ export default function App() {
             <i className="ti ti-stethoscope" style={{ fontSize: 18, color: "#185fa5" }} aria-hidden="true" />
           </div>
           <span style={{ fontWeight: 500, fontSize: 18 }}>Healthcare CV Search</span>
-          <span style={{ fontSize: 12, background: "var(--color-background-secondary)", border: "0.5px solid var(--color-border-tertiary)", borderRadius: 6, padding: "2px 8px", color: "var(--color-text-tertiary)" }}>
-            Prototype
-          </span>
+          <span style={{
+            fontSize: 12, background: "var(--color-background-secondary)",
+            border: "0.5px solid var(--color-border-tertiary)", borderRadius: 6,
+            padding: "2px 8px", color: "var(--color-text-tertiary)",
+          }}>v3</span>
         </div>
         <p style={{ margin: 0, fontSize: 13, color: "var(--color-text-secondary)", lineHeight: 1.5 }}>
-          Semantic candidate matching for UK healthcare roles · Milvus vector DB · Gemini AI summaries
+          Semantic candidate matching for UK healthcare roles · Milvus vector DB · Gemini AI · 5-section hybrid search
         </p>
       </div>
 
@@ -528,7 +614,7 @@ export default function App() {
         tabs={[
           { id: "search", label: "🔍 Search by JD" },
           { id: "ingest", label: "➕ Ingest candidate" },
-          { id: "crm", label: "🗂 CRM database" },
+          { id: "crm",    label: "🗂 CRM database" },
         ]}
         active={tab}
         onChange={setTab}
@@ -536,7 +622,7 @@ export default function App() {
 
       {tab === "search" && <SearchTab />}
       {tab === "ingest" && <IngestTab onSuccess={() => setRefreshCrm(r => r + 1)} />}
-      {tab === "crm" && <CrmTab refresh={refreshCrm} />}
+      {tab === "crm"    && <CrmTab refresh={refreshCrm} />}
     </div>
   );
 }
