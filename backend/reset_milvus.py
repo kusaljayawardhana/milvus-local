@@ -2,7 +2,7 @@ from pymilvus import connections, utility
 
 connections.connect(host="milvus", port="19530")
 
-collection_name = "healthcare_candidates"
+collection_name = "healthcare_candidates_v3"
 
 if utility.has_collection(collection_name):
     utility.drop_collection(collection_name)
